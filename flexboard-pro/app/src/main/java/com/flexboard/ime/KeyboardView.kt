@@ -1,0 +1,2668 @@
+package com.flexboard.ime
+
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.BitmapShader
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.ColorFilter
+import android.graphics.Matrix
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.PixelFormat
+import android.graphics.Rect
+import android.graphics.Shader
+import android.graphics.Typeface
+import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.Drawable
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.LayerDrawable
+import android.media.AudioManager
+import android.net.Uri
+import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
+import android.util.TypedValue
+import android.view.Gravity
+import android.view.HapticFeedbackConstants
+import android.view.MotionEvent
+import android.view.View
+import android.view.ViewGroup
+import android.view.ViewGroupOverlay
+import android.view.animation.DecelerateInterpolator
+import android.view.animation.OvershootInterpolator
+import kotlin.math.cos
+import kotlin.math.sin
+import kotlin.random.Random
+import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
+import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.PopupWindow
+import android.widget.ScrollView
+import android.widget.TextView
+import android.widget.Toast
+import com.flexboard.R
+import com.flexboard.data.db.AppDatabase
+import com.flexboard.data.db.ClipboardItem
+import com.flexboard.utils.BuiltInFonts
+import com.flexboard.utils.FontManager
+import com.flexboard.utils.FontEntry
+import com.flexboard.utils.SettingsStore
+import com.flexboard.utils.ThemeManager
+import com.flexboard.utils.UnicodeFonts
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
+
+enum class PanelMode { KEYS, EMOJI, AUTOTYPE, TOOLS, MATH_STYLES, ANIMATIONS }
+
+class KeyboardView(
+    ctx: Context,
+    private val onKey: (KeyDef) -> Unit,
+    private val getSuggestions: () -> List<String>,
+    private val onSuggestion: (String) -> Unit,
+    /** Returns the current ranked list of emoji suggestions (max 2). */
+    private val getEmojiSuggestions: () -> List<String> = { emptyList() },
+    /** Called when the user taps an emoji chip — inserts at cursor. */
+    private val onEmojiSuggestion: (String) -> Unit = { },
+    private val onClipboardOpen: () -> Unit,
+    private val onSwitchLanguage: () -> Unit,
+    private val onOpenSettings: () -> Unit,
+    /**
+     * Open a specific section of the host app (Theme / AutoType / Clipboard
+     * / etc.). Tools-grid tiles route through this so e.g. tapping the
+     * "Themes" tile lands the user directly in Theme & Appearance instead
+     * of the Home page (issue #1 in the user's review).
+     */
+    private val onOpenSection: (String) -> Unit = { onOpenSettings() },
+    /** Returns the text immediately before the cursor (or empty). */
+    private val readBeforeCursor: () -> String = { "" },
+    /** Replace [length] characters before the cursor with [text]. */
+    private val replaceBeforeCursor: (length: Int, text: String) -> Unit = { _, _ -> },
+    /** Commit the given string into the focused field via the IME injector. */
+    private val commitToField: (String) -> Unit = { },
+    /** Open a file picker and load the chosen text file into Auto-Type. */
+    private val onPickFile: () -> Unit = {}
+) : LinearLayout(ctx) {
+
+    // `var` (not `val`) so reload() can pick up theme changes — without this
+    // the keyboard would keep the colors captured at first construction even
+    // after the user picked a new built-in theme. Bug fix for "Built in
+    // theme not working".
+    private var theme = ThemeManager.current(ctx)
+    private var typeface: Typeface = FontManager.loadKeyTypeface(ctx)
+    private val vibrator: Vibrator? = run {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            (ctx.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager)?.defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            ctx.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+        }
+    }
+    private val prefs = SettingsStore.prefs(ctx)
+    private var currentLayout: KbLayout = KeyboardLayouts.forLanguage(prefs.getString(SettingsStore.KEY_LANGUAGE, "en") ?: "en")
+    private var shifted = false
+    private var symbolsMode = false
+    private var panelMode: PanelMode = PanelMode.KEYS
+
+    // Single unified strip at the top of the keyboard (suggestions + toolbar).
+    // The old design had two stacked rows: a separate suggestion row above
+    // a separate scrolling toolbar. Per user request these are now collapsed
+    // into ONE row — when the user is typing it shows suggestion words, and
+    // when there's nothing to suggest it shows the toolbar icons inline. A
+    // small "≡" menu button on the left is always present so the icons are
+    // reachable even mid-typing via a popup menu.
+    private val suggestionRow: LinearLayout
+    private val panelContainer: FrameLayout
+    private var atObserver: Job? = null
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    // v1.10 — Live WPM badge sitting next to the ≡ menu button. Created
+    // inside buildSuggestionRow(); updated via refreshWpm() on every
+    // keystroke and on a 1-second tick so the value fades back to "—"
+    // when the user pauses for more than WpmTracker.IDLE_MS.
+    private lateinit var wpmView: TextView
+    private var wpmTicker: Job? = null
+
+    /**
+     * Map of "key output → TextView" for the currently rendered keyboard
+     * layout. Used by `flashKeyForChar()` so the AutoTypeEngine can briefly
+     * highlight the matching key — this is the per-key press animation the
+     * user sees while the auto-typer is running.
+     */
+    private val keyViewMap = HashMap<String, TextView>()
+    private val flashHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    /**
+     * Live (TextView, KeyDef) pairs for every CHAR-type key in the current
+     * keys panel. Cleared and re-filled on every [rebuild]. Used by
+     * [updateLetterCase] for fast shift-toggle repaint.
+     *
+     * MUST be declared BEFORE the `init {}` block — Kotlin initializes
+     * properties top-to-bottom interleaved with init blocks, and `init`
+     * calls `rebuild()` which calls `charKeyViews.clear()` on the very
+     * first frame. If this field is below `init`, it is still null at
+     * that point and we crash with NPE on `List.clear()`.
+     */
+    private val charKeyViews = mutableListOf<Pair<TextView, KeyDef>>()
+
+    /**
+     * v1.8 — tracks BgImageKeyDrawables created during the current
+     * rebuild() pass so we can feed them the keyboard size + key offset
+     * after layout. The "pending" list is filled inside the inner loop
+     * (where the View doesn't exist yet) and drained immediately after
+     * the View is created — so [keyImageBindings] always carries triples
+     * of (real key view, its normal-state drawable, its pressed-state
+     * drawable) ready for [applyContinuousKeyWallpaper].
+     *
+     * IMPORTANT: declared HERE (above `init`) for the same reason as
+     * [charKeyViews] — `rebuild()` runs from the init block and clears
+     * both lists. Putting these declarations below `init` would leave
+     * them null at clear()-time → instant NPE on every single
+     * onCreateInputView() call (which is exactly the crash users hit
+     * after the first v1.8 build).
+     */
+    private val pendingKeyImageBindings = mutableListOf<Triple<View?, BgImageKeyDrawable, BgImageKeyDrawable>>()
+    private val keyImageBindings = mutableListOf<Triple<View, BgImageKeyDrawable, BgImageKeyDrawable>>()
+
+    init {
+        orientation = VERTICAL
+        applyKeyboardBackground()
+        val padPx = dp(4)
+        setPadding(padPx, padPx, padPx, padPx)
+
+        suggestionRow = buildSuggestionRow()
+        panelContainer = FrameLayout(ctx)
+
+        // Vertical order (top → bottom):
+        //   1) unified suggestion+toolbar row (single strip)
+        //   2) keys panel (or emoji / autotype panel)
+        addView(suggestionRow)
+        addView(panelContainer, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+
+        rebuild()
+    }
+
+    private fun applyKeyboardBackground() {
+        // Forget any previously cached bitmap so the per-key drawable
+        // path doesn't paint a stale image after the user picks a new
+        // wallpaper or clears it.
+        bgBitmap = null
+        val bgUri = prefs.getString(SettingsStore.KEY_BG_IMAGE_URI, null)
+        if (!bgUri.isNullOrBlank()) {
+            try {
+                val opacity = (prefs.getInt(SettingsStore.KEY_BG_IMAGE_OPACITY, 60) / 100f).coerceIn(0f, 1f)
+                val ins = context.contentResolver.openInputStream(Uri.parse(bgUri))
+                if (ins != null) {
+                    val bmp = BitmapFactory.decodeStream(ins)
+                    ins.close()
+                    if (bmp != null) {
+                        bgBitmap = bmp
+                        val baseColor = ColorDrawable(theme.keyboardBg)
+                        // ===== Custom BG must NOT inflate keyboard height (issue #4) =====
+                        // BitmapDrawable.getMinimumHeight()/getMinimumWidth() return
+                        // the bitmap's intrinsic pixel dimensions. Android's view
+                        // measure pass treats the background's minimum size as a
+                        // floor for the view's measured size — so a 1500×2000 user
+                        // photo would balloon the keyboard to 2000 px tall (the
+                        // exact "keyboard size badal jata hai" complaint). Wrapping
+                        // the BitmapDrawable so all four "minimum/intrinsic" methods
+                        // return -1 / 0 lets the keyboard keep its configured size
+                        // and simply fits the image inside the available bounds.
+                        val img = NoIntrinsicBitmapDrawable(resources, bmp).apply {
+                            alpha = (opacity * 255).toInt().coerceIn(0, 255)
+                            gravity = Gravity.BOTTOM or Gravity.FILL_HORIZONTAL
+                        }
+                        background = LayerDrawable(arrayOf(baseColor, img))
+                        return
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+        setBackgroundColor(theme.keyboardBg)
+    }
+
+    /**
+     * BitmapDrawable wrapper that hides the bitmap's intrinsic size from the
+     * view system. Used as the keyboard background so a tall/wide user photo
+     * doesn't force the keyboard to grow with it. The bitmap still PAINTS at
+     * its full quality (gravity decides how it fits), it just can't dictate
+     * the parent view's measured size anymore.
+     */
+    private class NoIntrinsicBitmapDrawable(
+        res: android.content.res.Resources,
+        bmp: android.graphics.Bitmap
+    ) : BitmapDrawable(res, bmp) {
+        override fun getIntrinsicWidth(): Int = -1
+        override fun getIntrinsicHeight(): Int = -1
+        override fun getMinimumWidth(): Int = 0
+        override fun getMinimumHeight(): Int = 0
+    }
+
+    /**
+     * Cached decoded copy of the user's custom keyboard background image.
+     * Populated by [applyKeyboardBackground] so the per-key
+     * [BgImageKeyDrawable] (issue #2 — "image keys pr bhi apply ho")
+     * doesn't have to re-decode the URI for every key on every rebuild.
+     */
+    private var bgBitmap: Bitmap? = null
+
+    /**
+     * Per-key background that paints the SAME bitmap on every key, scaled
+     * to fit the key's bounds (center-crop) and clipped to a rounded
+     * rectangle. Activated by the user's "Apply background image to keys"
+     * toggle in Theme settings (issue #2).
+     */
+    private class BgImageKeyDrawable(
+        private val bmp: Bitmap,
+        private val cornerRadius: Float,
+        opacity: Float
+    ) : Drawable() {
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            alpha = (opacity * 255).toInt().coerceIn(0, 255)
+        }
+        private val path = Path()
+        private val matrix = Matrix()
+        private val shader = BitmapShader(bmp, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
+        init { paint.shader = shader }
+
+        // ===== v1.8 — single continuous wallpaper across all keys =====
+        // The previous build painted one center-cropped copy of the
+        // bitmap inside EACH key, so the same image showed up 30+ times
+        // (once per key) instead of one big wallpaper visible "through"
+        // the keys (the user's exact complaint: "har key me alag pic
+        // lagti ha"). Now the host view tells us the FULL keyboard size
+        // and where this key sits within it, and we set up the bitmap
+        // shader so it covers the whole keyboard once — each key just
+        // becomes a window onto the part of that one image directly
+        // behind it. Falls back to per-key center-crop while we wait
+        // for the layout pass to deliver the position (single frame).
+        private var kbW = 0
+        private var kbH = 0
+        private var keyX = 0f
+        private var keyY = 0f
+        private var hasWindow = false
+
+        /**
+         * Tell the drawable the full keyboard size and this key's offset
+         * inside it. Called once after the keyboard's layout pass settles.
+         */
+        fun setKeyboardWindow(kbWidth: Int, kbHeight: Int, keyOffsetX: Float, keyOffsetY: Float) {
+            kbW = kbWidth; kbH = kbHeight
+            keyX = keyOffsetX; keyY = keyOffsetY
+            hasWindow = kbW > 0 && kbH > 0
+            recomputeMatrix()
+            invalidateSelf()
+        }
+
+        private fun recomputeMatrix() {
+            if (bmp.width <= 0 || bmp.height <= 0) return
+            val b = bounds
+            if (hasWindow) {
+                // Center-crop the bitmap to fill the WHOLE keyboard area,
+                // then translate it back by this key's offset so canvas
+                // (0,0) for this key shows the part of the wallpaper that
+                // sits behind it. Result: ONE continuous wallpaper, keys
+                // are transparent windows cut out of it.
+                val scale = maxOf(kbW.toFloat() / bmp.width, kbH.toFloat() / bmp.height)
+                val tx = (kbW - bmp.width * scale) / 2f - keyX
+                val ty = (kbH - bmp.height * scale) / 2f - keyY
+                matrix.setScale(scale, scale)
+                matrix.postTranslate(tx, ty)
+            } else {
+                // Fallback (first frame, before layout) — center-crop in
+                // local key bounds so we don't render a blank flash.
+                val w = b.width().toFloat()
+                val h = b.height().toFloat()
+                if (w <= 0 || h <= 0) return
+                val scale = maxOf(w / bmp.width, h / bmp.height)
+                val tx = (w - bmp.width * scale) / 2f + b.left
+                val ty = (h - bmp.height * scale) / 2f + b.top
+                matrix.setScale(scale, scale)
+                matrix.postTranslate(tx, ty)
+            }
+            shader.setLocalMatrix(matrix)
+        }
+
+        override fun onBoundsChange(bounds: Rect) {
+            super.onBoundsChange(bounds)
+            recomputeMatrix()
+            path.reset()
+            path.addRoundRect(
+                bounds.left.toFloat(), bounds.top.toFloat(),
+                bounds.right.toFloat(), bounds.bottom.toFloat(),
+                cornerRadius, cornerRadius, Path.Direction.CW
+            )
+        }
+
+        override fun draw(canvas: Canvas) {
+            if (bounds.isEmpty) return
+            canvas.save()
+            canvas.clipPath(path)
+            canvas.drawRect(bounds, paint)
+            canvas.restore()
+        }
+        override fun setAlpha(alpha: Int) { paint.alpha = alpha }
+        override fun setColorFilter(cf: ColorFilter?) { paint.colorFilter = cf }
+        override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
+        // v1.7 — feed the View's outline provider with the rounded shape
+        // so View.elevation casts a shadow that follows the key's pill
+        // outline (instead of the default rectangular one). Without this
+        // override the 3D shadow appears as a rectangle around the
+        // bitmap and ruins the soft pill look on per-key bg image mode.
+        override fun getOutline(outline: android.graphics.Outline) {
+            outline.setRoundRect(bounds, cornerRadius)
+        }
+    }
+
+    private fun dp(v: Int): Int = TypedValue.applyDimension(
+        TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics
+    ).toInt()
+
+    /**
+     * Resolves the label shown on every space key. The preference is the
+     * user-facing override from Theme settings; a blank value restores the
+     * build-time obfuscated default.
+     */
+    private fun spaceKeyLabel(): String {
+        val customLabel = prefs.getString(SettingsStore.KEY_SPACE_LABEL, "") ?: ""
+        if (customLabel.isNotBlank()) return customLabel
+        return com.flexboard.security.Obf
+            .decode(context, com.flexboard.security.ObfConstants.SPACE_LABEL)
+            .ifBlank { " " }
+    }
+
+    /**
+     * One toolbar / tools-panel action. [icon] is the small glyph rendered
+     * inline in the suggestion strip; [name] is the long label shown in the
+     * Gboard-style tools grid (`PanelMode.TOOLS`). Splitting them lets us
+     * use compact icons in the cramped inline strip while still showing
+     * readable names in the grid.
+     */
+    private data class ToolAction(
+        val icon: String,
+        val name: String,
+        // Optional vector drawable resource. When non-null the tile / inline
+        // chip renders this icon instead of the [icon] text glyph — used
+        // for the font picker so it gets a proper "Aa" graphic instead of
+        // the 🔤 emoji (which several Android phones rendered as a blank
+        // tofu box and which couldn't be tinted to match dark themes).
+        val iconRes: Int? = null,
+        // v1.7 — set false for colourful icons that should NOT be
+        // recoloured to match the active theme (e.g. the new generated
+        // gradient font-picker icon — tinting it monochrome ruins the
+        // glossy gradient the user explicitly asked for).
+        val tintIcon: Boolean = true,
+        // When true the tile is dimmed and clicks are ignored (e.g. Auto-Type
+        // when the plan has expired).
+        val disabled: Boolean = false,
+        val onClick: (View) -> Unit
+    )
+    /**
+     * Full set of tiles shown in the Gboard-style tools panel
+     * (`PanelMode.TOOLS`, opened by tapping the ≡ button on the suggestion
+     * strip). Lays out as a 4-column grid — see [rebuildTools]. Order is
+     * deliberate: the tools the user reaches for most (themes, font,
+     * clipboard, auto-type) sit on the top row.
+     */
+    private fun allToolActions(): List<ToolAction> {
+        // Disable Auto-Type whenever the plan is not active — covers Blocked,
+        // PlanExpired, TrialExpired and any other locked state by checking the
+        // shared allowsKeyboard flag instead of matching individual subclasses.
+        val autoTypeDisabled = try {
+            !com.flexboard.security.AccessGate.cachedState(context).allowsKeyboard
+        } catch (_: Throwable) { false }
+
+        return listOf(
+            // "Themes" tile now jumps DIRECTLY to the Theme & Appearance tab in
+            // the host app (it used to dump the user on the Home page —
+            // issue #1 in the user's review).
+            ToolAction("🎨", "Themes")    { onOpenSection("theme") },
+            ToolAction("Aa", "Font", iconRes = R.drawable.ic_font_picker_v2, tintIcon = false) { v -> showFontPicker(v) },
+            ToolAction("📋", "Clipboard") { showClipboardPopup() },
+            // Math/Leet style panel (replaces Language tile per user request).
+            ToolAction("🔢", "Math Style") { showMathStylesPanel() },
+            // Key-press animation picker.
+            ToolAction("⚡", "Effects")    { showAnimationsPanel() },
+            // Auto-Type moved to position 5 (was Language's position).
+            // Disabled when plan/trial has expired so the tile is visible but
+            // non-functional — tapping it does nothing and the icon is dimmed.
+            ToolAction("💣", "Auto-Type", disabled = autoTypeDisabled) { showAutoTypePanel() },
+            // File Import — opens Auto-Type section directly with file picker.
+            ToolAction("📂", "File Import") { onPickFile() },
+            ToolAction("⭐", "Plan Status") { onOpenSection("plans") },
+            ToolAction("⚙",  "Settings")  { onOpenSettings() }
+        )
+    }
+
+    private fun addToolbarButton(
+        parent: LinearLayout,
+        label: String,
+        iconRes: Int? = null,
+        tintIcon: Boolean = true,
+        onClick: (View) -> Unit
+    ) {
+        // When the action carries a vector icon (e.g. font picker's "Aa"
+        // glyph) we prefer it over the text glyph so it renders sharply
+        // and gets recolored to match the active theme. Otherwise fall
+        // back to the unicode label so emoji-based tiles still work.
+        val view: View = if (iconRes != null) {
+            ImageView(context).apply {
+                setImageResource(iconRes)
+                // Only tint when the caller asks for it. The new glossy
+                // gradient font-picker icon is meant to keep its colours
+                // — tinting would flatten the gradient to a single hue.
+                if (tintIcon) setColorFilter(theme.keyText)
+                scaleType = ImageView.ScaleType.FIT_CENTER
+                setPadding(dp(12), dp(8), dp(12), dp(8))
+                setOnClickListener { onClick(it) }
+            }
+        } else {
+            TextView(context).apply {
+                text = label
+                setTextColor(theme.keyText)
+                gravity = Gravity.CENTER
+                setPadding(dp(12), 0, dp(12), 0)
+                textSize = 14f
+                setTypeface(typeface)
+                setOnClickListener { onClick(it) }
+            }
+        }
+        parent.addView(view, LayoutParams(dp(44), LayoutParams.MATCH_PARENT))
+    }
+
+    /** Force reload theme/font/background/keys. Call after settings change. */
+    fun reload() {
+        try {
+            // Re-read theme from prefs FIRST — applyKeyboardBackground() and
+            // every key-build path below reads `theme.*`, so without this
+            // refresh a theme change wouldn't actually recolor the keys.
+            theme = ThemeManager.current(context)
+            typeface = FontManager.loadKeyTypeface(context)
+            applyKeyboardBackground()
+            removeAllViews()
+            val padPx = dp(4)
+            setPadding(padPx, padPx, padPx, padPx)
+            // Re-attach in the new top-down order: unified strip → panel.
+            addView(suggestionRow)
+            addView(panelContainer, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+            when (panelMode) {
+                PanelMode.KEYS -> rebuild()
+                PanelMode.EMOJI -> rebuildEmoji()
+                PanelMode.AUTOTYPE -> rebuildAutoType()
+                PanelMode.TOOLS -> rebuildTools()
+                PanelMode.MATH_STYLES -> rebuildMathStyles()
+                PanelMode.ANIMATIONS -> rebuildAnimations()
+            }
+            // refreshSuggestions() rebuilds the strip's contents (icons or
+            // suggestion words) using the freshly-loaded theme + typeface.
+            refreshSuggestions()
+        } catch (_: Exception) { rebuild() }
+    }
+
+    /**
+     * Builds the unified top strip: [≡ menu] [scroll area]. The scroll area
+     * gets refilled on every refreshSuggestions() — either with suggestion
+     * words (while the user is typing) or with the toolbar icons (when the
+     * field is empty / cleared). The menu button is always present so the
+     * full toolbar is reachable even mid-sentence.
+     */
+    private fun buildSuggestionRow(): LinearLayout {
+        val container = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, dp(42))
+            setBackgroundColor(theme.suggestionBg)
+        }
+        // Left-side menu button — opens a popup containing every toolbar
+        // action so the user can still reach AT / clipboard / settings even
+        // while suggestions are filling the strip.
+        val menuBtn = TextView(context).apply {
+            text = "≡"
+            setTextColor(theme.accent)
+            gravity = Gravity.CENTER
+            setPadding(dp(14), 0, dp(10), 0)
+            textSize = 20f
+            setTypeface(typeface)
+            setOnClickListener { showToolsPanel() }
+        }
+        container.addView(menuBtn, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.MATCH_PARENT))
+
+        // v1.10 — Live WPM badge sitting immediately right of the ≡ button.
+        // Two stacked lines: the speed number on top in the accent colour,
+        // the literal "WPM" caption below in muted text — same visual style
+        // as a stopwatch readout. Updates are pushed by `refreshWpm()` from
+        // both the typing-driven path (FlexboardIMEService.handleKey) and
+        // the 1-second idle ticker so the number fades to "—" when the user
+        // pauses for >3 s. Tap toggles a tiny popup that explains the badge
+        // (and lets the user reset the counter), keeping the strip clean
+        // for everyone who doesn't care about the metric.
+        wpmView = TextView(context).apply {
+            text = "—\nWPM"
+            // No `theme.muted` exists on the Theme data class — derive a
+            // muted shade by blending keyText 60 % toward suggestionBg.
+            // Built once per rebuild() (cheap) so the badge tone always
+            // matches whatever theme the user just switched to.
+            // Muted = keyText at ~60 % alpha. Avoids needing a separate
+            // theme.muted field while still reading as a soft secondary
+            // label on every supported theme.
+            setTextColor((theme.keyText and 0x00FFFFFF) or (0x99 shl 24))
+            gravity = Gravity.CENTER
+            setPadding(dp(2), 0, dp(8), 0)
+            textSize = 9f
+            // Tight vertical packing — two lines have to fit inside the
+            // 42dp suggestion strip without clipping the descenders.
+            setLineSpacing(0f, 0.85f)
+            setTypeface(typeface)
+            setOnClickListener {
+                // Quick reset: tap to zero the rolling window. Useful when
+                // the user wants to time a fresh paragraph from scratch.
+                WpmTracker.reset()
+                refreshWpm()
+            }
+        }
+        container.addView(wpmView, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.MATCH_PARENT))
+        // Scrollable content area (suggestions OR inline icons)
+        val scroll = HorizontalScrollView(context).apply {
+            isHorizontalScrollBarEnabled = false
+            overScrollMode = OVER_SCROLL_NEVER
+        }
+        val inner = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            layoutParams = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.MATCH_PARENT)
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        scroll.addView(inner)
+        container.addView(scroll, LayoutParams(0, LayoutParams.MATCH_PARENT, 1f))
+        container.tag = inner
+        return container
+    }
+
+    fun refreshSuggestions() {
+        val inner = suggestionRow.tag as LinearLayout
+        inner.removeAllViews()
+        val list = getSuggestions()
+        val emojis = getEmojiSuggestions()
+        if (list.isEmpty() && emojis.isEmpty()) {
+            // Idle state → keep the strip clean. The toolbar icons that used
+            // to render here inline have been removed per user request — the
+            // ≡ menu button on the left already opens the full tools grid,
+            // so duplicating those icons in the strip was redundant.
+            return
+        }
+        // Typing state → emoji chips first (deliberately leftmost so they
+        // catch the eye), then word suggestions. Tapping an emoji inserts
+        // it at the cursor without erasing the partial word — they're a
+        // *companion* to what the user is typing, not a replacement.
+        emojis.forEach { emoji ->
+            val tv = TextView(context).apply {
+                text = emoji
+                setTextColor(theme.keyText)
+                gravity = Gravity.CENTER
+                setPadding(dp(14), 0, dp(14), 0)
+                textSize = 20f
+                // No setTypeface() — the bundled fancy fonts don't carry
+                // emoji glyphs, so let the system emoji font render them.
+                setOnClickListener { onEmojiSuggestion(emoji) }
+            }
+            inner.addView(tv, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.MATCH_PARENT))
+        }
+        // Word suggestions. Toolbar icons remain accessible through the ≡
+        // menu button on the left of the strip.
+        list.forEach { word ->
+            val tv = TextView(context).apply {
+                text = word
+                setTextColor(theme.keyText)
+                gravity = Gravity.CENTER
+                setPadding(dp(20), 0, dp(20), 0)
+                setTypeface(typeface)
+                setOnClickListener { onSuggestion(word) }
+            }
+            inner.addView(tv, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.MATCH_PARENT))
+        }
+    }
+
+    /**
+     * Open the Gboard-style tools panel inside the keyboard area. Replaces
+     * the old floating popup that anchored above the ≡ button — the user
+     * specifically asked for the menu to "open in the keyboard like Gboard"
+     * with a tile grid (see attached screenshot reference). Cancels any
+     * Auto-Type observer first so we don't keep firing rebuilds at this
+     * panel from the engine's StateFlow.
+     */
+    private fun showToolsPanel() {
+        panelMode = PanelMode.TOOLS
+        atObserver?.cancel(); atObserver = null
+        rebuildTools()
+    }
+
+    /**
+     * Render the tools panel: a 4-column grid of icon-over-label tiles
+     * (Themes / Font / Clipboard / Auto-Type / Language / Emoji / Keyboard
+     * / Settings). Lays out inside `panelContainer` so it occupies the
+     * exact same on-screen real estate as the keys panel — the user sees
+     * a clean swap, not an overlay.
+     *
+     * Sized to the same total height as the keys panel
+     * (`keyHeight × 5`) so the keyboard window doesn't grow / shrink
+     * jarringly when the user opens the tools view.
+     */
+    private fun rebuildTools() {
+        panelContainer.removeAllViews()
+        val pad = dp(10)
+        val keyHeight = prefs.getInt(SettingsStore.KEY_KEY_HEIGHT_DP, 50).coerceIn(36, 80)
+        val totalH = dp(keyHeight) * 5
+
+        val root = LinearLayout(context).apply {
+            orientation = VERTICAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, totalH)
+            setPadding(pad, pad, pad, pad)
+            setBackgroundColor(theme.keyboardBg)
+        }
+
+        // Header strip
+        root.addView(TextView(context).apply {
+            text = "Tools"
+            setTextColor(theme.accent)
+            textSize = 16f
+            setTypeface(null, Typeface.BOLD)
+            setPadding(dp(2), 0, 0, dp(6))
+        }, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+
+        // 4-column grid. Each row is a horizontal LinearLayout with equal
+        // weighted children; rows themselves have equal weight inside the
+        // grid container so vertical space distributes evenly even when the
+        // last row has fewer than 4 entries.
+        val tools = allToolActions()
+        val cols = 4
+        val rows = (tools.size + cols - 1) / cols
+        val grid = LinearLayout(context).apply {
+            orientation = VERTICAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f)
+        }
+        for (r in 0 until rows) {
+            val rowView = LinearLayout(context).apply {
+                orientation = HORIZONTAL
+                layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f)
+            }
+            for (c in 0 until cols) {
+                val idx = r * cols + c
+                val params = LayoutParams(0, LayoutParams.MATCH_PARENT, 1f).apply {
+                    setMargins(dp(4), dp(4), dp(4), dp(4))
+                }
+                if (idx < tools.size) {
+                    rowView.addView(buildToolTile(tools[idx]), params)
+                } else {
+                    // Empty placeholder keeps remaining tiles in their
+                    // grid columns instead of stretching to fill.
+                    rowView.addView(View(context), params)
+                }
+            }
+            grid.addView(rowView)
+        }
+        root.addView(grid)
+
+        // Back button — explicit return to the keys panel since the user
+        // is now off the keyboard layout entirely.
+        root.addView(pillBtn("⌨ Back to keyboard") { showKeysPanel() },
+            LayoutParams(LayoutParams.MATCH_PARENT, dp(40)).apply { topMargin = dp(6) })
+
+        panelContainer.addView(root)
+    }
+
+    /**
+     * Build a single tool tile (icon centered over a small label) for the
+     * tools grid. Styled like a standard key (rounded background, theme
+     * colors) so the panel feels visually consistent with the keyboard
+     * itself.
+     */
+    private fun buildToolTile(tool: ToolAction): View {
+        // FrameLayout tile: inner LinearLayout is WRAP_CONTENT and centered via
+        // FrameLayout.LayoutParams gravity=CENTER — this guarantees the icon+label
+        // block is always vertically and horizontally centred inside the tile no
+        // matter how tall the row becomes (fixes icon-cut-off / below-center bug).
+        val tile = FrameLayout(context).apply {
+            background = makeKeyBackground(theme.keyBg, "rounded", 1f)
+            isClickable = !tool.disabled
+            if (tool.disabled) alpha = 0.35f
+            else setOnClickListener { tool.onClick(it) }
+        }
+        // Icon only — no text label below (user request: remove text from tiles).
+        val iconView: View = if (tool.iconRes != null) {
+            ImageView(context).apply {
+                setImageResource(tool.iconRes)
+                if (tool.tintIcon) setColorFilter(theme.keyText)
+                scaleType = ImageView.ScaleType.FIT_CENTER
+            }
+        } else {
+            TextView(context).apply {
+                text = tool.icon
+                textSize = 22f
+                gravity = Gravity.CENTER
+                includeFontPadding = false
+                setTextColor(theme.keyText)
+            }
+        }
+        // Fixed icon size — small enough to sit comfortably inside the tile.
+        val iconSize = dp(30)
+        tile.addView(iconView, FrameLayout.LayoutParams(iconSize, iconSize, Gravity.CENTER))
+        return tile
+    }
+
+    fun setLanguage(code: String) {
+        prefs.edit().putString(SettingsStore.KEY_LANGUAGE, code).apply()
+        currentLayout = KeyboardLayouts.forLanguage(code)
+        symbolsMode = false
+        showKeysPanel()
+    }
+
+    /**
+     * Shift toggle. Critical perf-fix: instead of running the full [rebuild]
+     * (which destroys & re-creates ~30 TextViews + their backgrounds + their
+     * touch listeners), we just walk the existing CHAR-key TextViews and
+     * flip their text upper/lower case. On a mid-range device this drops
+     * the per-tap shift cost from ~25ms to <1ms — the user reported the
+     * keyboard "felt slow / laggy"; that lag was the rebuild storm.
+     *
+     * Symbols toggle still goes through full [rebuild] because the layout
+     * itself changes (different keys, different widths).
+     */
+    fun toggleShift() {
+        shifted = !shifted
+        if (panelMode == PanelMode.KEYS) updateLetterCase()
+    }
+    fun toggleSymbols() { symbolsMode = !symbolsMode; if (panelMode == PanelMode.KEYS) rebuild() }
+
+    /**
+     * Programmatically set the shift state — called by FlexboardIMEService
+     * when auto-capitalization decides the next character should be upper
+     * case (start of field, right after `.`/`?`/`!`/`۔` + space, or right
+     * after a newline). Early-returns when the state hasn't actually
+     * changed so we never trigger a needless re-layout from
+     * `onUpdateSelection` floods.
+     */
+    fun setShifted(s: Boolean) {
+        if (shifted == s) return
+        shifted = s
+        if (panelMode == PanelMode.KEYS) updateLetterCase()
+    }
+
+    /** Read-only accessor so the IME service can inspect the current state. */
+    fun isShifted(): Boolean = shifted
+
+    /**
+     * Walk every CHAR-type key currently on screen and flip its visible
+     * text between lowercase and the layout's natural label (which is
+     * uppercase on the lettered rows). Only mutates `tv.text` — no view
+     * recreation, no background re-allocation, no listener re-binding —
+     * so it's cheap enough to call on every cursor move from
+     * `onUpdateSelection` without making typing feel sticky.
+     *
+     * `charKeyViews` is populated by [rebuild] in lock-step with the views
+     * it inflates, so the references here are always live for the current
+     * keys panel.
+     */
+    private fun updateLetterCase() {
+        if (panelMode != PanelMode.KEYS) return
+        for ((tv, key) in charKeyViews) {
+            tv.text = if (shifted) key.label.uppercase() else key.label
+        }
+    }
+
+    private fun activeLayout(): KbLayout = if (symbolsMode) KeyboardLayouts.SYMBOLS else currentLayout
+
+    private fun showKeysPanel() {
+        panelMode = PanelMode.KEYS
+        atObserver?.cancel(); atObserver = null
+        rebuild()
+    }
+
+    /**
+     * v1.10 — public entry point for the IME service to force the keyboard
+     * back to the KEYS panel every time it's shown. Without this, the
+     * KeyboardView instance is reused across show/hide cycles (Android
+     * recycles the view returned from onCreateInputView), so closing the
+     * keyboard while on Emoji / Auto-Type / Tools meant the next open
+     * still landed on that panel — which the user found disorienting.
+     * Now every onStartInputView call resets the panel to keys.
+     *
+     * No-op when already on the KEYS panel so we don't waste a rebuild
+     * on the common case (most opens already start there).
+     */
+    fun resetToKeysPanel() {
+        if (panelMode == PanelMode.KEYS) return
+        showKeysPanel()
+    }
+
+    private fun showEmojiPanel() {
+        panelMode = PanelMode.EMOJI
+        atObserver?.cancel(); atObserver = null
+        rebuildEmoji()
+    }
+
+    private fun showAutoTypePanel() {
+        panelMode = PanelMode.AUTOTYPE
+        rebuildAutoType()
+        atObserver?.cancel()
+        atObserver = scope.launch {
+            AutoTypeEngine.state.collectLatest { rebuildAutoType() }
+        }
+    }
+
+    // ===== KEY-PRESS ANIMATION ENGINE =====
+
+    /**
+     * 13 animation styles selectable via the ⚡ Effects panel.
+     * On ACTION_DOWN (press=true): applies a key transform AND spawns
+     * particles via [spawnParticles] for particle-style effects.
+     * On ACTION_UP/CANCEL (press=false): springs the key back to rest.
+     * All animations use View.animate() — GPU-accelerated, cancel-safe,
+     * zero per-keystroke allocation.
+     */
+    private fun applyKeyPressAnim(v: View, restElev: Float, press: Boolean) {
+        val style = prefs.getString(SettingsStore.KEY_KEY_ANIMATION, "press_in") ?: "press_in"
+        v.animate().cancel()
+        if (press) {
+            // Particle effects: spawn on every key down for particle styles.
+            spawnParticles(v, style)
+            when (style) {
+                "press_in" -> v.animate()
+                    .scaleX(0.93f).scaleY(0.93f).translationZ(-restElev)
+                    .setInterpolator(DecelerateInterpolator()).setDuration(60).start()
+                "pop" -> v.animate()
+                    .scaleX(1.15f).scaleY(1.15f)
+                    .setInterpolator(DecelerateInterpolator()).setDuration(65).start()
+                "bounce" -> v.animate()
+                    .translationY(dp(5).toFloat()).scaleX(0.95f).scaleY(0.95f)
+                    .setInterpolator(DecelerateInterpolator()).setDuration(60).start()
+                "shake" -> {
+                    v.animate().translationX(dp(-4).toFloat()).setDuration(35)
+                        .withEndAction {
+                            v.animate().translationX(dp(4).toFloat()).setDuration(35)
+                                .withEndAction { v.animate().translationX(0f).setDuration(25).start() }
+                                .start()
+                        }.start()
+                }
+                "flip" -> v.animate()
+                    .rotationY(25f).scaleX(0.9f)
+                    .setInterpolator(DecelerateInterpolator()).setDuration(70).start()
+                "glow" -> v.animate()
+                    .alpha(0.45f).scaleX(1.05f).scaleY(1.05f)
+                    .setInterpolator(DecelerateInterpolator()).setDuration(60).start()
+                "zoom_out" -> v.animate()
+                    .scaleX(0.78f).scaleY(0.78f).translationZ(-restElev)
+                    .setInterpolator(DecelerateInterpolator()).setDuration(70).start()
+                "slide_down" -> v.animate()
+                    .translationY(dp(6).toFloat()).alpha(0.7f)
+                    .setInterpolator(DecelerateInterpolator()).setDuration(60).start()
+                "rubber_band" -> v.animate()
+                    .scaleX(0.82f).scaleY(1.12f)
+                    .setInterpolator(DecelerateInterpolator()).setDuration(65).start()
+                "pulse" -> v.animate()
+                    .scaleX(1.22f).scaleY(1.22f)
+                    .setInterpolator(DecelerateInterpolator()).setDuration(50).start()
+                "jelly" -> v.animate()
+                    .scaleX(0.85f).scaleY(0.85f).rotationY(10f)
+                    .setInterpolator(DecelerateInterpolator()).setDuration(55).start()
+                "spin_tap" -> v.animate()
+                    .rotation(18f).scaleX(0.9f).scaleY(0.9f)
+                    .setInterpolator(DecelerateInterpolator()).setDuration(70).start()
+                "heart_break" -> v.animate()
+                    .scaleX(0.88f).scaleY(1.1f).rotationY(12f)
+                    .setInterpolator(DecelerateInterpolator()).setDuration(65).start()
+                else -> v.animate()
+                    .scaleX(0.93f).scaleY(0.93f).translationZ(-restElev)
+                    .setInterpolator(DecelerateInterpolator()).setDuration(60).start()
+            }
+        } else {
+            // Release / spring-back for every style
+            when (style) {
+                "shake" -> v.animate()
+                    .translationX(0f).translationY(0f).scaleX(1f).scaleY(1f)
+                    .alpha(1f).rotation(0f).rotationY(0f).translationZ(0f)
+                    .setInterpolator(OvershootInterpolator(1.4f)).setDuration(100).start()
+                "flip" -> v.animate()
+                    .rotationY(0f).scaleX(1f).scaleY(1f).translationZ(0f)
+                    .setInterpolator(OvershootInterpolator(2f)).setDuration(130).start()
+                "glow" -> v.animate()
+                    .alpha(1f).scaleX(1f).scaleY(1f)
+                    .setInterpolator(OvershootInterpolator(2f)).setDuration(130).start()
+                "rubber_band" -> v.animate()
+                    .scaleX(1f).scaleY(1f)
+                    .setInterpolator(OvershootInterpolator(3f)).setDuration(140).start()
+                "pulse" -> v.animate()
+                    .scaleX(1f).scaleY(1f).translationZ(0f)
+                    .setInterpolator(OvershootInterpolator(3f)).setDuration(150).start()
+                "jelly" -> v.animate()
+                    .scaleX(1f).scaleY(1f).rotationY(0f)
+                    .setInterpolator(OvershootInterpolator(3.5f)).setDuration(150).start()
+                "spin_tap" -> v.animate()
+                    .rotation(0f).scaleX(1f).scaleY(1f)
+                    .setInterpolator(OvershootInterpolator(2f)).setDuration(140).start()
+                "pop" -> v.animate()
+                    .scaleX(1f).scaleY(1f)
+                    .setInterpolator(OvershootInterpolator(3f)).setDuration(150).start()
+                "heart_break" -> v.animate()
+                    .scaleX(1f).scaleY(1f).rotationY(0f)
+                    .setInterpolator(OvershootInterpolator(2.5f)).setDuration(140).start()
+                else -> v.animate()
+                    .scaleX(1f).scaleY(1f).translationY(0f).translationZ(0f)
+                    .alpha(1f).rotation(0f).rotationY(0f)
+                    .setInterpolator(OvershootInterpolator(1.6f)).setDuration(120).start()
+            }
+        }
+    }
+
+    /**
+     * Spawns emoji particles from the centre of [anchor] using the keyboard
+     * panel's ViewGroupOverlay — particles fly in all directions, fall with
+     * a gravity bias, then fade out and are removed automatically.
+     * Only called for visual-effect styles; no-ops for plain transform styles.
+     */
+    private fun spawnParticles(anchor: View, style: String) {
+        // Map each style to its particle emojis. Styles with no entry get no particles.
+        val emojis: List<String> = when (style) {
+            "pop"        -> listOf("⭐", "✨", "🌟", "💫", "⭐", "✨")
+            "pulse"      -> listOf("❤️", "💗", "💕", "❤️", "💖", "💗")
+            "heart_break"-> listOf("💔", "💔", "❤️", "💔", "🩹", "💔")
+            "bounce"     -> listOf("🎊", "🎉", "✨", "🎊", "⭐", "🎉")
+            "glow"       -> listOf("✨", "💫", "🌟", "✨", "💫", "🌟")
+            "spin_tap"   -> listOf("🌟", "⭐", "💥", "🌟", "✨", "⭐")
+            "jelly"      -> listOf("🫧", "🫧", "💧", "🫧", "🫧", "💧")
+            "shake"      -> listOf("⚡", "💢", "⚡", "💥", "⚡", "💢")
+            "flip"       -> listOf("🌀", "💫", "🌀", "✨", "🌀", "💫")
+            "zoom_out"   -> listOf("💥", "🔥", "💥", "✨", "💥", "🔥")
+            "rubber_band"-> listOf("🎯", "⚡", "🎯", "💥", "🎯", "⚡")
+            "slide_down" -> listOf("🍂", "⭐", "🍂", "✨", "🍂", "⭐")
+            else -> return  // press_in and unknown: no particles
+        }
+
+        // Locate anchor centre relative to panelContainer
+        val anchorPos = IntArray(2)
+        val containerPos = IntArray(2)
+        anchor.getLocationInWindow(anchorPos)
+        panelContainer.getLocationInWindow(containerPos)
+        val cx = (anchorPos[0] - containerPos[0] + anchor.width / 2f)
+        val cy = (anchorPos[1] - containerPos[1] + anchor.height / 2f)
+        // If panelContainer hasn't been laid out yet, abort silently.
+        if (panelContainer.width == 0) return
+
+        val overlay = panelContainer.overlay as ViewGroupOverlay
+        val particleSize = dp(28)
+        val half = particleSize / 2
+
+        emojis.forEachIndexed { i, emoji ->
+            val tv = TextView(context).apply {
+                text = emoji
+                textSize = 17f
+                gravity = Gravity.CENTER
+                includeFontPadding = false
+            }
+            // Pre-measure and lay out the particle at the key centre.
+            val spec = View.MeasureSpec.makeMeasureSpec(particleSize, View.MeasureSpec.EXACTLY)
+            tv.measure(spec, spec)
+            val left = (cx - half).toInt().coerceAtLeast(0)
+            val top  = (cy - half).toInt().coerceAtLeast(0)
+            tv.layout(left, top, left + particleSize, top + particleSize)
+            overlay.add(tv)
+
+            // Random outward direction + upward bias then gravity pull
+            val angleDeg = (i * 60.0 + Random.nextDouble(-20.0, 20.0))
+            val dist     = dp(45 + Random.nextInt(30)).toFloat()
+            val dx       = (cos(Math.toRadians(angleDeg)) * dist).toFloat()
+            // Negative = upward initially, positive = downward (gravity bias)
+            val dy       = (sin(Math.toRadians(angleDeg)) * dist).toFloat() - dp(28)
+            val delay    = (i * 18L)
+            val dur      = 520L
+
+            tv.postDelayed({
+                tv.animate()
+                    .translationX(dx)
+                    .translationY(dy + dp(60)) // extra fall after initial burst
+                    .alpha(0f)
+                    .scaleX(0.25f).scaleY(0.25f)
+                    .setDuration(dur)
+                    .setInterpolator(DecelerateInterpolator(1.5f))
+                    .withEndAction { overlay.remove(tv) }
+                    .start()
+            }, delay)
+        }
+    }
+
+    // ===== ANIMATIONS PANEL =====
+
+    private fun showAnimationsPanel() {
+        panelMode = PanelMode.ANIMATIONS
+        atObserver?.cancel(); atObserver = null
+        rebuildAnimations()
+    }
+
+    /**
+     * Full-keyboard animation picker panel with 12 styles.
+     * Each tile shows a name + emoji preview. Tapping a tile saves the
+     * style to SharedPrefs (KEY_KEY_ANIMATION) and rebuilds the panel so
+     * the selection is immediately highlighted. The next key press will use
+     * the new animation — no keyboard rebuild required.
+     */
+    private fun rebuildAnimations() {
+        panelContainer.removeAllViews()
+        val pad = dp(10)
+        val keyHeight = prefs.getInt(SettingsStore.KEY_KEY_HEIGHT_DP, 50).coerceIn(36, 80)
+        val totalH = dp(keyHeight) * 5
+        val activeAnim = prefs.getString(SettingsStore.KEY_KEY_ANIMATION, "press_in") ?: "press_in"
+
+        data class AnimEntry(val id: String, val icon: String, val name: String)
+        val anims = listOf(
+            AnimEntry("press_in",    "⬇️",  "Press In"),
+            AnimEntry("pop",         "⭐",   "Stars Pop"),
+            AnimEntry("bounce",      "🎊",   "Confetti"),
+            AnimEntry("shake",       "⚡",   "Sparks"),
+            AnimEntry("flip",        "🌀",   "Flip"),
+            AnimEntry("glow",        "✨",   "Glow"),
+            AnimEntry("zoom_out",    "💥",   "Explode"),
+            AnimEntry("slide_down",  "🍂",   "Falling"),
+            AnimEntry("rubber_band", "🎯",   "Rubber Band"),
+            AnimEntry("pulse",       "❤️",   "Hearts"),
+            AnimEntry("jelly",       "🫧",   "Bubbles"),
+            AnimEntry("spin_tap",    "🌟",   "Spin Stars"),
+            AnimEntry("heart_break", "💔",   "Heart Break")
+        )
+
+        val root = LinearLayout(context).apply {
+            orientation = VERTICAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, totalH)
+            setPadding(pad, pad, pad, pad)
+            setBackgroundColor(theme.keyboardBg)
+        }
+
+        root.addView(TextView(context).apply {
+            text = "⚡ Key Effects"
+            setTextColor(theme.accent)
+            textSize = 16f
+            setTypeface(null, Typeface.BOLD)
+            setPadding(dp(2), 0, 0, dp(4))
+        }, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+
+        // 4-column grid — 3 rows of 4 = 12 entries
+        val cols = 4
+        val rows = (anims.size + cols - 1) / cols
+        val grid = LinearLayout(context).apply {
+            orientation = VERTICAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f)
+        }
+        for (r in 0 until rows) {
+            val rowView = LinearLayout(context).apply {
+                orientation = HORIZONTAL
+                layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f)
+            }
+            for (c in 0 until cols) {
+                val idx = r * cols + c
+                val tileParams = LayoutParams(0, LayoutParams.MATCH_PARENT, 1f).apply {
+                    setMargins(dp(3), dp(3), dp(3), dp(3))
+                }
+                if (idx < anims.size) {
+                    val anim = anims[idx]
+                    val selected = activeAnim == anim.id
+                    // FrameLayout tile so the icon + label block can be centered via gravity.
+                    val tile = FrameLayout(context).apply {
+                        background = makeKeyBackground(
+                            if (selected) theme.accent else theme.keyBg, "rounded", 1f
+                        )
+                        setOnClickListener {
+                            prefs.edit().putString(SettingsStore.KEY_KEY_ANIMATION, anim.id).apply()
+                            rebuildAnimations()
+                        }
+                    }
+                    val inner = LinearLayout(context).apply {
+                        orientation = VERTICAL
+                        gravity = Gravity.CENTER_HORIZONTAL
+                    }
+                    inner.addView(TextView(context).apply {
+                        text = anim.icon
+                        textSize = 16f
+                        gravity = Gravity.CENTER
+                        includeFontPadding = false
+                    }, LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
+                    inner.addView(TextView(context).apply {
+                        text = anim.name
+                        textSize = 8f
+                        gravity = Gravity.CENTER
+                        includeFontPadding = false
+                        setTextColor(if (selected) android.graphics.Color.BLACK else theme.keyText)
+                        maxLines = 1
+                        ellipsize = android.text.TextUtils.TruncateAt.END
+                    }, LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+                    tile.addView(inner, FrameLayout.LayoutParams(
+                        LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.CENTER))
+                    rowView.addView(tile, tileParams)
+                } else {
+                    rowView.addView(android.view.View(context), tileParams)
+                }
+            }
+            grid.addView(rowView)
+        }
+        root.addView(grid)
+
+        root.addView(pillBtn("⌨ Back to keyboard") { showKeysPanel() },
+            LayoutParams(LayoutParams.MATCH_PARENT, dp(40)).apply { topMargin = dp(6) })
+
+        panelContainer.addView(root)
+    }
+
+    // ===== MATH / LEET STYLE PANEL =====
+
+    private fun showMathStylesPanel() {
+        panelMode = PanelMode.MATH_STYLES
+        atObserver?.cancel(); atObserver = null
+        rebuildMathStyles()
+    }
+
+    /**
+     * Full-keyboard math/leet style picker panel.
+     * Shows: on/off toggle + 6 style tiles + "Back to keyboard" button.
+     * Selecting a style writes KEY_FONT_STYLE so the existing `stylize()`
+     * pipeline in FlexboardIMEService automatically applies leet transforms
+     * to every typed character — no extra wiring needed.
+     */
+    private fun rebuildMathStyles() {
+        panelContainer.removeAllViews()
+        val pad = dp(10)
+        val keyHeight = prefs.getInt(SettingsStore.KEY_KEY_HEIGHT_DP, 50).coerceIn(36, 80)
+        val totalH = dp(keyHeight) * 5
+
+        val mathOn = prefs.getBoolean(SettingsStore.KEY_MATH_STYLE_ON, false)
+        val activeId = prefs.getString(SettingsStore.KEY_MATH_STYLE_ID, "leet_pro") ?: "leet_pro"
+
+        val mathStyles = listOf(
+            Triple("leet_basic",  "1337 Basic",  "H3ll0"),
+            Triple("leet_pro",    "H4ck3r Pr0",  "5y573m"),
+            Triple("leet_cyber",  "Cy83r @tt@ck","Cy83r"),
+            Triple("leet_shadow", "5h4d0w M0d3", "D4rk"),
+            Triple("leet_matrix", "M47r1x C0d3", "M47r1x"),
+            Triple("triple_echo", "TTTriiippp",  "aaa bbb")
+        )
+
+        val root = LinearLayout(context).apply {
+            orientation = VERTICAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, totalH)
+            setPadding(pad, pad, pad, pad)
+            setBackgroundColor(theme.keyboardBg)
+        }
+
+        // Header
+        root.addView(TextView(context).apply {
+            text = "🔢 Math Style"
+            setTextColor(theme.accent)
+            textSize = 16f
+            setTypeface(null, Typeface.BOLD)
+            setPadding(dp(2), 0, 0, dp(4))
+        }, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+
+        // ON / OFF toggle row
+        val toggleRow = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(4), 0, dp(8))
+        }
+        toggleRow.addView(TextView(context).apply {
+            text = "Math Style:"
+            setTextColor(theme.keyText)
+            textSize = 13f
+            setTypeface(typeface)
+        }, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
+
+        val onBtn = TextView(context).apply {
+            text = "ON"
+            textSize = 12f
+            gravity = Gravity.CENTER
+            setPadding(dp(14), dp(6), dp(14), dp(6))
+            setTypeface(typeface)
+            background = makeKeyBackground(
+                if (mathOn) theme.accent else theme.keyBg, "rounded", 1f
+            )
+            setTextColor(if (mathOn) android.graphics.Color.BLACK else theme.keyText)
+            setOnClickListener {
+                if (!mathOn) {
+                    // Save previous font style before activating math mode
+                    val prev = prefs.getString(SettingsStore.KEY_FONT_STYLE, "normal") ?: "normal"
+                    if (!prev.startsWith("leet_") && prev != "triple_echo") {
+                        prefs.edit().putString(SettingsStore.KEY_PREV_FONT_STYLE, prev).apply()
+                    }
+                    prefs.edit()
+                        .putBoolean(SettingsStore.KEY_MATH_STYLE_ON, true)
+                        .putString(SettingsStore.KEY_FONT_STYLE, activeId)
+                        .apply()
+                }
+                rebuildMathStyles()
+            }
+        }
+        val offBtn = TextView(context).apply {
+            text = "OFF"
+            textSize = 12f
+            gravity = Gravity.CENTER
+            setPadding(dp(14), dp(6), dp(14), dp(6))
+            setTypeface(typeface)
+            background = makeKeyBackground(
+                if (!mathOn) theme.accent else theme.keyBg, "rounded", 1f
+            )
+            setTextColor(if (!mathOn) android.graphics.Color.BLACK else theme.keyText)
+            setOnClickListener {
+                if (mathOn) {
+                    // Restore the font style that was active before math mode
+                    val prev = prefs.getString(SettingsStore.KEY_PREV_FONT_STYLE, "normal") ?: "normal"
+                    prefs.edit()
+                        .putBoolean(SettingsStore.KEY_MATH_STYLE_ON, false)
+                        .putString(SettingsStore.KEY_FONT_STYLE, prev)
+                        .apply()
+                }
+                rebuildMathStyles()
+            }
+        }
+
+        val btnParams = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
+            marginStart = dp(10)
+        }
+        toggleRow.addView(onBtn, btnParams)
+        toggleRow.addView(offBtn, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
+            marginStart = dp(6)
+        })
+        root.addView(toggleRow, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+
+        // Style tiles — 3 columns × 2 rows
+        val cols = 3
+        val rows = (mathStyles.size + cols - 1) / cols
+        val grid = LinearLayout(context).apply {
+            orientation = VERTICAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f)
+        }
+        for (r in 0 until rows) {
+            val rowView = LinearLayout(context).apply {
+                orientation = HORIZONTAL
+                layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f)
+            }
+            for (c in 0 until cols) {
+                val idx = r * cols + c
+                val tileParams = LayoutParams(0, LayoutParams.MATCH_PARENT, 1f).apply {
+                    setMargins(dp(3), dp(3), dp(3), dp(3))
+                }
+                if (idx < mathStyles.size) {
+                    val (id, name, sample) = mathStyles[idx]
+                    val isSelected = mathOn && activeId == id
+                    val tile = LinearLayout(context).apply {
+                        orientation = VERTICAL
+                        gravity = Gravity.CENTER
+                        background = makeKeyBackground(
+                            if (isSelected) theme.accent else theme.keyBg, "rounded", 1f
+                        )
+                        setPadding(dp(4), dp(6), dp(4), dp(6))
+                        setOnClickListener {
+                            // Save previous style if not already in math mode
+                            if (!mathOn) {
+                                val prev = prefs.getString(SettingsStore.KEY_FONT_STYLE, "normal") ?: "normal"
+                                if (!prev.startsWith("leet_") && prev != "triple_echo") {
+                                    prefs.edit().putString(SettingsStore.KEY_PREV_FONT_STYLE, prev).apply()
+                                }
+                            }
+                            prefs.edit()
+                                .putBoolean(SettingsStore.KEY_MATH_STYLE_ON, true)
+                                .putString(SettingsStore.KEY_MATH_STYLE_ID, id)
+                                .putString(SettingsStore.KEY_FONT_STYLE, id)
+                                .apply()
+                            rebuildMathStyles()
+                        }
+                    }
+                    tile.addView(TextView(context).apply {
+                        text = sample
+                        textSize = 13f
+                        gravity = Gravity.CENTER
+                        setTextColor(if (isSelected) android.graphics.Color.BLACK else theme.keyText)
+                        setTypeface(typeface)
+                    }, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
+                    tile.addView(TextView(context).apply {
+                        text = name
+                        textSize = 10f
+                        gravity = Gravity.CENTER
+                        setTextColor(if (isSelected) android.graphics.Color.BLACK else theme.keyText)
+                        maxLines = 1
+                        ellipsize = android.text.TextUtils.TruncateAt.END
+                    }, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
+                    rowView.addView(tile, tileParams)
+                } else {
+                    rowView.addView(android.view.View(context), tileParams)
+                }
+            }
+            grid.addView(rowView)
+        }
+        root.addView(grid)
+
+        // Back button
+        root.addView(pillBtn("⌨ Back to keyboard") { showKeysPanel() },
+            LayoutParams(LayoutParams.MATCH_PARENT, dp(40)).apply { topMargin = dp(6) })
+
+        panelContainer.addView(root)
+    }
+
+    private fun rebuild() {
+        panelContainer.removeAllViews()
+        // Default key height bumped 50→58 dp + min raised 36→44 dp so the
+        // out-of-the-box keys feel comfortably tall (user complaint:
+        // "keys boht choti hain, thori or bari kro"). Max kept at 90 dp
+        // so power users on tablets can still go bigger.
+        val keyHeight = prefs.getInt(SettingsStore.KEY_KEY_HEIGHT_DP, 58).coerceIn(44, 90)
+        val rowHeight = dp(keyHeight)
+        val keyTextSize = prefs.getInt(SettingsStore.KEY_KEY_TEXT_SIZE, 17).toFloat()
+        val storedBorder = prefs.getString(SettingsStore.KEY_BORDER_STYLE, "rounded") ?: "rounded"
+        val storedOpacity = prefs.getInt(SettingsStore.KEY_KEY_OPACITY, 100) / 100f
+        val hasBgImage = !prefs.getString(SettingsStore.KEY_BG_IMAGE_URI, null).isNullOrBlank()
+        val showBordersOverBg = prefs.getBoolean(SettingsStore.KEY_BG_SHOW_BORDERS, false)
+        // ===== Per-key bg image (issue #2) =====
+        // When the user enables "Apply background image to keys", every
+        // key gets the same wallpaper as its background (clipped to its
+        // rounded shape). We still keep the keyboard-wide image too — the
+        // toggle is additive.
+        val bgImageOnKeys = prefs.getBoolean(SettingsStore.KEY_BG_IMAGE_ON_KEYS, false)
+        val applyBgToKeys = bgImageOnKeys && hasBgImage && bgBitmap != null
+        // When custom background image is active, default to transparent borderless keys
+        // so the picture shows through. User can re-enable borders in Theme settings.
+        val borderStyle = if (hasBgImage && !showBordersOverBg && !applyBgToKeys) "none" else storedBorder
+        val keyOpacity = if (hasBgImage && !showBordersOverBg && !applyBgToKeys) 0f else storedOpacity
+        val perKeyBgOpacity = (prefs.getInt(SettingsStore.KEY_BG_IMAGE_OPACITY, 60) / 100f).coerceIn(0.2f, 1f)
+        // ===== v1.7 — per-key spacing slider =====
+        // Default 3 dp gives a tight Gboard-class packed grid. Earlier
+        // v1.6 hard-coded 6 dp made the keys *look* smaller because
+        // each key lost ~12 dp of width to gaps. Slider goes 1..8 dp.
+        val keyMarginPx = dp(prefs.getInt(SettingsStore.KEY_KEY_MARGIN_DP, 3).coerceIn(1, 8))
+        // ===== v1.7 — Gboard-style 3D shadow =====
+        // ON (default) = each key gets View.elevation so Android renders
+        // a soft drop-shadow underneath, and the touch listener animates
+        // the elevation down to 0 on press for a real "pressed in" feel.
+        val use3dShadow = prefs.getBoolean(SettingsStore.KEY_KEY_3D_SHADOW, true)
+        val restElevationPx = if (use3dShadow) dp(3).toFloat() else 0f
+
+        val keys = LinearLayout(context).apply { orientation = VERTICAL }
+
+        // Re-build key registry every layout pass so flashKeyForChar() resolves
+        // against the currently visible keys (handles language switch etc.).
+        keyViewMap.clear()
+        // v1.8 — drop any per-key wallpaper bindings from the previous
+        // rebuild so the list doesn't grow without bound and stale views
+        // (now detached) don't get position queries.
+        pendingKeyImageBindings.clear()
+        keyImageBindings.clear()
+        // ===== PERF =====
+        // Char-key registry (tv ↔ KeyDef) used by [updateLetterCase] for
+        // the lightweight shift-toggle path. Cleared here to stay in sync
+        // with the views we're about to inflate.
+        charKeyViews.clear()
+        val normalBg = theme.keyBg
+        val pressedBg = theme.pressedKey
+
+        activeLayout().rows.forEach { row ->
+            val rowView = LinearLayout(context).apply {
+                orientation = HORIZONTAL
+                layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, rowHeight)
+            }
+            row.forEach { key ->
+                // ===== PERF =====
+                // Pre-build the normal + pressed-state drawables ONCE per
+                // key here. Previously the touch listener recreated a fresh
+                // GradientDrawable on every ACTION_DOWN and ACTION_UP — two
+                // allocations per keystroke × hundreds of keystrokes per
+                // minute = noticeable GC stalls (≈8-12 ms hitches the user
+                // described as "slow / laggy" typing). Caching reuses the
+                // exact same drawable instances across taps so the touch
+                // listener now just swaps two object references.
+                val normalBgDrawable: Drawable
+                val pressedBgDrawable: Drawable
+                if (applyBgToKeys) {
+                    // Per-key bitmap drawable. The pressed state reuses the
+                    // same image but tints it darker via a LayerDrawable
+                    // overlay so the user still gets visual feedback.
+                    val cornerR = when (borderStyle) {
+                        "none" -> 0f
+                        "thin" -> dp(4).toFloat()
+                        "thick" -> dp(2).toFloat()
+                        else -> dp(8).toFloat()
+                    }
+                    val bmp = bgBitmap!!
+                    val normalBmpDrawable = BgImageKeyDrawable(bmp, cornerR, perKeyBgOpacity)
+                    val pressedBmpDrawable = BgImageKeyDrawable(bmp, cornerR, perKeyBgOpacity)
+                    normalBgDrawable = normalBmpDrawable
+                    val pressedOverlay = makeKeyBackground(
+                        // Press state = bg image + 35 % darkening overlay,
+                        // mimics Gboard's "tap glow" without hiding the
+                        // wallpaper underneath.
+                        Color.argb(90, Color.red(pressedBg), Color.green(pressedBg), Color.blue(pressedBg)),
+                        borderStyle, 1f
+                    )
+                    pressedBgDrawable = LayerDrawable(arrayOf(
+                        pressedBmpDrawable,
+                        pressedOverlay
+                    ))
+                    // v1.8 — register this key so we can feed it the
+                    // keyboard size + its offset once layout finishes.
+                    // Without this the BgImageKeyDrawable would just
+                    // center-crop in its own bounds and the user would
+                    // see the same picture stamped on every single key.
+                    pendingKeyImageBindings.add(
+                        Triple(null, normalBmpDrawable, pressedBmpDrawable)
+                    )
+                } else {
+                    normalBgDrawable  = makeKeyBackground(normalBg,  borderStyle, keyOpacity)
+                    pressedBgDrawable = makeKeyBackground(pressedBg, borderStyle, keyOpacity)
+                }
+
+                val tv = TextView(context).apply {
+                    val display = when (key.type) {
+                        // The label is user-editable from the main Theme
+                        // settings. A blank preference restores the built-in
+                        // branding label, while output remains a real space.
+                        KeyType.SPACE -> spaceKeyLabel()
+                        else -> if (shifted && key.type == KeyType.CHAR) key.label.uppercase() else key.label
+                    }
+                    text = display
+                    setTextColor(theme.keyText)
+                    gravity = Gravity.CENTER
+                    setTypeface(typeface)
+                    textSize = keyTextSize
+                    background = normalBgDrawable
+                    val mPx = dp(2)
+                    setPadding(mPx, mPx, mPx, mPx)
+                    // ===== v1.7 — baseline 3D shadow under each key =====
+                    // We use View.elevation (with outlineProvider derived
+                    // from the bg drawable's rounded shape) so Android
+                    // renders a real soft drop shadow — same technique
+                    // Gboard uses for its "pill" key look. Skip the
+                    // outline override when applyBgToKeys is on, because
+                    // BgImageKeyDrawable's clipPath already defines the
+                    // visual shape and the system's auto-outline gives a
+                    // matching shadow.
+                    if (use3dShadow) {
+                        elevation = restElevationPx
+                        outlineProvider = android.view.ViewOutlineProvider.BACKGROUND
+                        clipToOutline = false
+                    }
+                    // Tag carries: (a) the per-key cached drawables so
+                    // [flashKeyForChar] and the touch listener can swap
+                    // backgrounds without allocating, and (b) the styling
+                    // info needed when the theme/background changes.
+                    tag = KeyStyle(borderStyle, keyOpacity, normalBgDrawable, pressedBgDrawable)
+                    setOnTouchListener { v, ev ->
+                        when (ev.action) {
+                            MotionEvent.ACTION_DOWN -> {
+                                // Reuse the cached pressed-state drawable
+                                // — no per-touch allocation.
+                                v.background = pressedBgDrawable
+                                // Apply the user-chosen key-press animation.
+                                applyKeyPressAnim(v, restElevationPx, press = true)
+                                doFeedback(v)
+                                handleKeyTap(key)
+                                // ===== Backspace press-and-hold (issue #3) =====
+                                // After ~350 ms of holding ⌫, start firing
+                                // additional delete events on a repeat loop
+                                // that ACCELERATES with hold time:
+                                //   • starts at 80 ms / delete (gentle),
+                                //   • ramps down to 25 ms / delete after
+                                //     ~30 deletes (≈ 1.5 s of holding),
+                                // so a quick tap is still one character but
+                                // a long press wipes a whole sentence in
+                                // a couple of seconds. Released on ACTION_UP
+                                // / ACTION_CANCEL below.
+                                if (key.type == KeyType.BACKSPACE) {
+                                    startBackspaceRepeat(key)
+                                }
+                                true
+                            }
+                            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                                v.background = normalBgDrawable
+                                // Spring the key back using the chosen animation's release path.
+                                applyKeyPressAnim(v, restElevationPx, press = false)
+                                if (key.type == KeyType.BACKSPACE) {
+                                    stopBackspaceRepeat()
+                                }
+                                true
+                            }
+                            else -> false
+                        }
+                    }
+                    // ===== Long-press char alternates =====
+                    // BACKSPACE is intentionally NOT given a long-click
+                    // listener anymore — its press-and-hold behaviour is
+                    // handled inline above (continuous delete with
+                    // acceleration, the user's explicit request). The old
+                    // Select-All / Copy / Cut / Paste menu is still
+                    // reachable through the keyboard's ≡ menu, so the
+                    // editor actions aren't lost.
+                    if (key.type != KeyType.BACKSPACE && !key.longPress.isNullOrEmpty()) {
+                        setOnLongClickListener {
+                            onKey(key.copy(output = key.longPress.first().toString()))
+                            true
+                        }
+                    }
+                }
+                // Register both the lowercase and shifted-uppercase form so
+                // AutoType matches "h" against the [h] key whether the
+                // keyboard is currently in lowercase or shifted state.
+                if (key.type == KeyType.CHAR) {
+                    keyViewMap[key.output.lowercase()] = tv
+                    keyViewMap[key.output.uppercase()] = tv
+                    charKeyViews.add(tv to key)
+                } else if (key.type == KeyType.SPACE) {
+                    keyViewMap[" "] = tv
+                } else if (key.output.isNotEmpty()) {
+                    keyViewMap[key.output] = tv
+                }
+                val params = LayoutParams(0, LayoutParams.MATCH_PARENT, key.widthWeight)
+                // Per-key spacing bumped 4 dp → 6 dp so the keys feel
+                // properly separated (issue #3 — "keys apas me mili hui
+                // hain, separate ho thori"). Combined with the new
+                // 58 dp default height + scale-on-press animation this
+                // gives the keyboard a Gboard-class tactile feel without
+                // wasting horizontal real estate.
+                params.setMargins(keyMarginPx, keyMarginPx, keyMarginPx, keyMarginPx)
+                rowView.addView(tv, params)
+                // v1.8 — if we just registered an image-key binding for
+                // this key, attach the actual View now (we couldn't pass
+                // it earlier because tv is created inside the same loop).
+                if (applyBgToKeys && pendingKeyImageBindings.isNotEmpty()) {
+                    val last = pendingKeyImageBindings.removeAt(pendingKeyImageBindings.size - 1)
+                    if (last.first == null) {
+                        keyImageBindings.add(Triple(tv, last.second, last.third))
+                    } else {
+                        // Shouldn't happen, but keep it safe.
+                        pendingKeyImageBindings.add(last)
+                    }
+                }
+            }
+            keys.addView(rowView)
+        }
+        panelContainer.addView(keys, FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+        refreshSuggestions()
+        // v1.8 — once the keyboard has been laid out, walk every image-
+        // key we registered above and tell its drawable the full
+        // keyboard size + the key's position inside it. That turns the
+        // 30 independent "stamped" images into one continuous wallpaper
+        // visible THROUGH each key. Done via post() so we run after the
+        // layout pass settles every TextView's left/top.
+        if (applyBgToKeys && keyImageBindings.isNotEmpty()) {
+            this.post { applyContinuousKeyWallpaper() }
+        }
+    }
+
+    private fun applyContinuousKeyWallpaper() {
+        val kw = width
+        val kh = height
+        if (kw <= 0 || kh <= 0) {
+            // Layout still pending — try once more on the next frame.
+            this.post { applyContinuousKeyWallpaper() }
+            return
+        }
+        val tmp = Rect()
+        keyImageBindings.forEach { (v, normalBmp, pressedBmp) ->
+            tmp.set(0, 0, v.width, v.height)
+            // Translates the rect from v's coord space into ours
+            // (KeyboardView), so tmp.left/tmp.top == v's offset within
+            // the full keyboard.
+            this.offsetDescendantRectToMyCoords(v, tmp)
+            normalBmp.setKeyboardWindow(kw, kh, tmp.left.toFloat(), tmp.top.toFloat())
+            pressedBmp.setKeyboardWindow(kw, kh, tmp.left.toFloat(), tmp.top.toFloat())
+        }
+    }
+
+    /**
+     * Per-key cached state stored in `View.tag`. The drawable references
+     * let the touch handler and `flashKeyForChar()` swap visuals without
+     * allocating new GradientDrawables on every press.
+     */
+    private data class KeyStyle(
+        val borderStyle: String,
+        val opacity: Float,
+        val normalBg: android.graphics.drawable.Drawable,
+        val pressedBg: android.graphics.drawable.Drawable
+    )
+
+    /**
+     * Briefly highlight the key matching [ch] so the user can SEE the
+     * AutoTypeEngine "press" each character on the visible keyboard. Safe
+     * to call from any thread — runs on the UI handler. Uses the cached
+     * pressed/normal drawables stored in the key's tag so even visualizing
+     * a fast auto-type stream allocates nothing per flash.
+     */
+    fun flashKeyForChar(ch: String) {
+        val key = ch.firstOrNull()?.toString() ?: return
+        val tv = keyViewMap[key] ?: keyViewMap[key.lowercase()] ?: return
+        flashHandler.post {
+            val style = tv.tag as? KeyStyle ?: return@post
+            tv.background = style.pressedBg
+            flashHandler.postDelayed({
+                tv.background = style.normalBg
+            }, 90L)
+        }
+    }
+
+    // ===== Backspace press-and-hold (issue #3) =====
+    // The user wants holding ⌫ to delete characters continuously and the
+    // delete speed to ramp up the longer they hold (so a long sentence
+    // wipes in 1-2 seconds instead of having to tap dozens of times).
+    // Implementation: Handler-driven repeat loop, kicks in after a short
+    // initial delay so a normal tap still removes exactly one character.
+    private val backspaceHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var backspaceRepeats = 0
+    private var backspaceRunnable: Runnable? = null
+
+    private fun startBackspaceRepeat(key: KeyDef) {
+        // Cancel any leftover loop from a previous press.
+        stopBackspaceRepeat()
+        backspaceRepeats = 0
+        val r = object : Runnable {
+            override fun run() {
+                // Re-fire backspace through the regular IME pipeline so
+                // selection-aware delete and stylized-glyph handling still
+                // work the same as a manual tap.
+                onKey(key)
+                backspaceRepeats++
+                // Acceleration curve: start gentle, ramp aggressive.
+                //   0-3   → 80 ms  (~12.5 char/s)
+                //   4-9   → 60 ms  (~16.7 char/s)
+                //   10-19 → 40 ms  (~25 char/s)
+                //   20+   → 25 ms  (~40 char/s, full erase speed)
+                val nextDelayMs = when {
+                    backspaceRepeats < 4  -> 80L
+                    backspaceRepeats < 10 -> 60L
+                    backspaceRepeats < 20 -> 40L
+                    else                  -> 25L
+                }
+                backspaceHandler.postDelayed(this, nextDelayMs)
+            }
+        }
+        backspaceRunnable = r
+        // Initial 350 ms grace so a fast tap doesn't accidentally delete
+        // a second character before the user lifts their finger.
+        backspaceHandler.postDelayed(r, 350L)
+    }
+
+    private fun stopBackspaceRepeat() {
+        backspaceRunnable?.let { backspaceHandler.removeCallbacks(it) }
+        backspaceRunnable = null
+        backspaceRepeats = 0
+    }
+
+    private fun handleKeyTap(key: KeyDef) {
+        when (key.type) {
+            KeyType.SHIFT -> toggleShift()
+            KeyType.SYMBOLS -> toggleSymbols()
+            KeyType.LANGUAGE -> onSwitchLanguage()
+            KeyType.EMOJI -> showEmojiPanel()
+            KeyType.CLIPBOARD -> onClipboardOpen()
+            else -> {
+                val out = if (shifted && key.type == KeyType.CHAR) key.output.uppercase() else key.output
+                onKey(key.copy(output = out))
+                if (shifted && key.type == KeyType.CHAR) { shifted = false; rebuild() }
+            }
+        }
+    }
+
+    // ===== EMOJI PANEL =====
+    private fun rebuildEmoji() {
+        panelContainer.removeAllViews()
+        // Cap the emoji panel so it never balloons to fullscreen.
+        // Layout = category strip (40dp) + scrollable grid (3 emoji rows × 44dp = 132dp)
+        // + bottom bar (44dp) = ~216dp total. Internal ScrollView lets the user scroll
+        // through long categories without making the keyboard taller.
+        val catStripH = dp(40)
+        val bottomBarH = dp(44)
+        val emojiRowH = dp(44)
+        val gridRows = 3
+        val totalH = catStripH + (emojiRowH * gridRows) + bottomBarH
+        val root = LinearLayout(context).apply {
+            orientation = VERTICAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, totalH)
+        }
+
+        // Category strip
+        val catScroll = HorizontalScrollView(context).apply {
+            isHorizontalScrollBarEnabled = false
+            setBackgroundColor(theme.suggestionBg)
+        }
+        val catRow = LinearLayout(context).apply { orientation = HORIZONTAL }
+        val grid = LinearLayout(context).apply {
+            orientation = VERTICAL
+        }
+
+        // v1.10 — `loadCategory` now reads optional per-category column count
+        // and font size from `EmojiData.Category` so the new "Lines" tab can
+        // use 2 wide cells with a 13sp font (a 12-15 char divider doesn't fit
+        // a normal 22sp / 8-col emoji cell — the text would truncate or look
+        // micro-tiny). Single-glyph categories continue to default to 8 × 22sp.
+        fun loadCategory(emojis: List<String>, perRow: Int = 8, textSizeSp: Float = 22f) {
+            grid.removeAllViews()
+            if (emojis.isEmpty()) return
+            var rowView: LinearLayout? = null
+            var cellsInRow = 0
+            emojis.forEachIndexed { idx, e ->
+                if (idx % perRow == 0) {
+                    rowView = LinearLayout(context).apply {
+                        orientation = HORIZONTAL
+                        layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, dp(44))
+                    }
+                    grid.addView(rowView)
+                    cellsInRow = 0
+                }
+                val tv = TextView(context).apply {
+                    text = e
+                    textSize = textSizeSp
+                    // Multi-character "Lines" entries can still slightly
+                    // overflow at 13sp on narrow screens; ellipsize end so
+                    // the cell never breaks the row layout. Single-glyph
+                    // emojis at 22sp are well under one cell's width and
+                    // won't trigger any ellipsis.
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                    gravity = Gravity.CENTER
+                    setTextColor(theme.keyText)
+                    setTypeface(typeface)
+                    setOnClickListener {
+                        onKey(KeyDef(label = e, output = e, type = KeyType.CHAR))
+                        addRecentEmoji(e)
+                    }
+                }
+                rowView!!.addView(tv, LayoutParams(0, LayoutParams.MATCH_PARENT, 1f))
+                cellsInRow++
+            }
+            // Pad the final row with empty placeholders so cells stay the same
+            // size on the Recent tab (where only 3-4 items might exist) instead
+            // of stretching to fill the row.
+            if (cellsInRow in 1 until perRow) {
+                repeat(perRow - cellsInRow) {
+                    rowView!!.addView(View(context), LayoutParams(0, LayoutParams.MATCH_PARENT, 1f))
+                }
+            }
+        }
+
+        // Recent first
+        val recents = recentEmojis()
+        if (recents.isNotEmpty()) {
+            val btn = catTab("⏱") {
+                loadCategory(recents)
+            }
+            catRow.addView(btn)
+        }
+        EmojiData.CATEGORIES.forEach { cat ->
+            val btn = catTab(cat.emojis.firstOrNull() ?: "★") {
+                loadCategory(cat.emojis, cat.columnsPerRow, cat.textSizeSp)
+            }
+            catRow.addView(btn)
+        }
+
+        // Default to first category (Recents if available, else Smileys).
+        val firstCat = EmojiData.CATEGORIES.first()
+        if (recents.isNotEmpty()) loadCategory(recents)
+        else loadCategory(firstCat.emojis, firstCat.columnsPerRow, firstCat.textSizeSp)
+
+        catScroll.addView(catRow)
+        root.addView(catScroll, LayoutParams(LayoutParams.MATCH_PARENT, dp(40)))
+
+        val scroll = ScrollView(context)
+        scroll.addView(grid)
+        root.addView(scroll, LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f))
+
+        // bottom bar with backspace + return
+        val bottom = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, dp(44))
+            setBackgroundColor(theme.suggestionBg)
+        }
+        val abc = TextView(context).apply {
+            text = "ABC"
+            setTextColor(theme.keyText); setTypeface(typeface)
+            gravity = Gravity.CENTER
+            setOnClickListener { showKeysPanel() }
+        }
+        val back = TextView(context).apply {
+            text = "⌫"
+            setTextColor(theme.keyText); setTypeface(typeface)
+            gravity = Gravity.CENTER
+            setOnClickListener { onKey(KeyDef("⌫", "back", type = KeyType.BACKSPACE)) }
+        }
+        val space = TextView(context).apply {
+            text = spaceKeyLabel()
+            setTextColor(theme.keyText); setTypeface(typeface)
+            gravity = Gravity.CENTER
+            setOnClickListener { onKey(KeyDef("space", " ", type = KeyType.SPACE)) }
+        }
+        val enter = TextView(context).apply {
+            text = "⏎"
+            setTextColor(theme.keyText); setTypeface(typeface)
+            gravity = Gravity.CENTER
+            setOnClickListener { onKey(KeyDef("⏎", "enter", type = KeyType.ENTER)) }
+        }
+        bottom.addView(abc, LayoutParams(0, LayoutParams.MATCH_PARENT, 1f))
+        bottom.addView(space, LayoutParams(0, LayoutParams.MATCH_PARENT, 4f))
+        bottom.addView(back, LayoutParams(0, LayoutParams.MATCH_PARENT, 1f))
+        bottom.addView(enter, LayoutParams(0, LayoutParams.MATCH_PARENT, 1f))
+        root.addView(bottom)
+
+        // IMPORTANT: pass the explicit totalH so the bottom bar stays docked.
+        // If we passed WRAP_CONTENT here, the inner ScrollView (weight=1) would
+        // collapse to its content height, so on the Recent tab (one short row)
+        // the ABC/space/⌫/⏎ bar would shift up against the emojis.
+        panelContainer.addView(
+            root,
+            FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, totalH)
+        )
+    }
+
+    private fun catTab(label: String, onClick: () -> Unit): TextView = TextView(context).apply {
+        text = label
+        textSize = 18f
+        setTextColor(theme.keyText)
+        setTypeface(typeface)
+        gravity = Gravity.CENTER
+        setPadding(dp(14), 0, dp(14), 0)
+        setOnClickListener { onClick() }
+    }
+
+    private fun recentEmojis(): List<String> {
+        return try {
+            val s = prefs.getString(SettingsStore.KEY_EMOJI_RECENT, "[]") ?: "[]"
+            val a = JSONArray(s)
+            (0 until a.length()).map { a.getString(it) }.take(24)
+        } catch (_: Exception) { emptyList() }
+    }
+
+    private fun addRecentEmoji(e: String) {
+        val cur = recentEmojis().toMutableList()
+        cur.remove(e); cur.add(0, e)
+        val arr = JSONArray()
+        cur.take(24).forEach { arr.put(it) }
+        prefs.edit().putString(SettingsStore.KEY_EMOJI_RECENT, arr.toString()).apply()
+    }
+
+    // ===== AUTO-TYPE PANEL =====
+    /**
+     * In-keyboard Auto-Type control panel. Rebuilt per user feedback to be
+     *   • BIGGER     — taller rows, larger title, bigger START/STOP button
+     *                 so it feels like a real control surface, not a cramped
+     *                 strip of pill buttons.
+     *   • CLEANER    — only the controls that matter while typing live in
+     *                 the keyboard: status, delay, loop, START/STOP, pause.
+     *   • SIMPLER    — a SINGLE START/STOP button that toggles its color +
+     *                 label from green "▶ START" to red "■ STOP" depending
+     *                 on engine state. Removed: AutoSend toggle, separate
+     *                 Stop button, "Open settings" shortcut — those still
+     *                 live in the full Settings screen, the keyboard panel
+     *                 only needs the live runtime controls.
+     *
+     * IMPORTANT: panel-level settings such as AutoSend and target line are
+     * still respected by the engine; we just don't expose toggles for them
+     * in the cramped in-keyboard view. They're configurable from the main
+     * Settings → Auto-Type screen.
+     */
+    private fun rebuildAutoType() {
+        panelContainer.removeAllViews()
+        val pad = dp(14)
+        val keyHeight = prefs.getInt(SettingsStore.KEY_KEY_HEIGHT_DP, 50).coerceIn(36, 80)
+        // Bigger panel — was keyHeight*5, now keyHeight*6 with a min of
+        // 320dp so even when the user has shrunk their keys the panel
+        // still has room for readable status text + finger-friendly buttons.
+        val totalH = maxOf(dp(keyHeight) * 6, dp(320))
+
+        val root = LinearLayout(context).apply {
+            orientation = VERTICAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, totalH)
+            setPadding(pad, pad, pad, pad)
+            setBackgroundColor(theme.keyboardBg)
+        }
+
+        val state = AutoTypeEngine.state.value
+        val delaySec = prefs.getInt(SettingsStore.KEY_AT_DELAY, 5)
+        val loop = prefs.getBoolean(SettingsStore.KEY_AT_LOOP, false)
+
+        // ===== HEADER =====  Title on the left, live status badge on right.
+        val header = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        header.addView(TextView(context).apply {
+            text = "💣 Auto-Type"
+            setTextColor(theme.accent)
+            textSize = 18f
+            setTypeface(null, Typeface.BOLD)
+        }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
+        val badgeText = when {
+            state.running && state.paused -> "⏸ PAUSED"
+            state.running                 -> "▶ RUNNING"
+            else                          -> "⏹ STOPPED"
+        }
+        val badgeColor = if (state.running) theme.accent else theme.keyText
+        header.addView(TextView(context).apply {
+            text = badgeText
+            setTextColor(badgeColor)
+            textSize = 12f
+            setTypeface(null, Typeface.BOLD)
+            setPadding(dp(10), dp(4), dp(10), dp(4))
+            background = makeKeyBackground(theme.keyBg, "rounded", 1f)
+        }, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
+        root.addView(header)
+
+        // ===== STATUS BLOCK =====  Source file → line counter → live line.
+        val sourceText = if (state.total == 0) "📂 No file/text loaded" else "📂 ${state.sourceName}"
+        root.addView(TextView(context).apply {
+            text = sourceText
+            setTextColor(theme.keyText)
+            textSize = 13f
+            setPadding(0, dp(10), 0, 0)
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+        })
+        root.addView(TextView(context).apply {
+            text = if (state.total > 0) "Line ${state.current} / ${state.total}" else " "
+            setTextColor(theme.keyText)
+            textSize = 13f
+        })
+        root.addView(TextView(context).apply {
+            text = if (state.currentLine.isNotEmpty()) "→ ${state.currentLine}" else " "
+            setTextColor(Color.LTGRAY)
+            textSize = 11f
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setPadding(0, dp(2), 0, dp(10))
+        })
+
+        // ===== SETTINGS ROW =====  Delay − value + and Loop toggle.
+        val rowSettings = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, dp(48))
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val minusBtn = bigBtn("−", theme.keyBg) {
+            val v = (prefs.getInt(SettingsStore.KEY_AT_DELAY, 5) - 1).coerceAtLeast(1)
+            prefs.edit().putInt(SettingsStore.KEY_AT_DELAY, v).apply(); rebuildAutoType()
+        }
+        val delayLabel = TextView(context).apply {
+            text = "Delay  ${delaySec}s"
+            setTextColor(theme.keyText)
+            textSize = 14f
+            gravity = Gravity.CENTER
+            setTypeface(null, Typeface.BOLD)
+        }
+        val plusBtn = bigBtn("+", theme.keyBg) {
+            val v = (prefs.getInt(SettingsStore.KEY_AT_DELAY, 5) + 1).coerceAtMost(60)
+            prefs.edit().putInt(SettingsStore.KEY_AT_DELAY, v).apply(); rebuildAutoType()
+        }
+        val loopBtn = bigBtn(if (loop) "🔁 Loop ON" else "🔁 Loop OFF",
+            if (loop) theme.accent else theme.keyBg) {
+            prefs.edit().putBoolean(SettingsStore.KEY_AT_LOOP, !loop).apply(); rebuildAutoType()
+        }
+        rowSettings.addView(minusBtn,
+            LayoutParams(0, LayoutParams.MATCH_PARENT, 0.7f).apply { setMargins(0, 0, dp(4), 0) })
+        rowSettings.addView(delayLabel,
+            LayoutParams(0, LayoutParams.MATCH_PARENT, 1.2f))
+        rowSettings.addView(plusBtn,
+            LayoutParams(0, LayoutParams.MATCH_PARENT, 0.7f).apply { setMargins(dp(4), 0, dp(8), 0) })
+        rowSettings.addView(loopBtn,
+            LayoutParams(0, LayoutParams.MATCH_PARENT, 1.6f))
+        root.addView(rowSettings)
+
+        // ===== ACTION ROW =====  Unified START/STOP toggle + Pause/Resume.
+        // The user explicitly asked for ONE button that flips between
+        // start and stop instead of two separate buttons. Color tells the
+        // story: accent green-ish when ready to start, red when running.
+        val rowAct = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, dp(56)).apply { topMargin = dp(10) }
+        }
+        val startStopColor = if (state.running) Color.parseColor("#E53935") else theme.accent
+        val startStopLabel = if (state.running) "■  STOP" else "▶  START"
+        val startStopBtn = bigBtn(startStopLabel, startStopColor) {
+            if (state.running) {
+                AutoTypeEngine.stop()
+                try { AutoTypeForegroundService.stop(context.applicationContext) } catch (_: Throwable) {}
+            } else {
+                try { AutoTypeForegroundService.start(context.applicationContext) } catch (_: Throwable) {}
+                AutoTypeEngine.start(
+                    context.applicationContext,
+                    prefs.getInt(SettingsStore.KEY_AT_START_LINE, 0)
+                )
+            }
+        }
+        val pauseLabel = if (state.paused) "▶ Resume" else "⏸ Pause"
+        val pauseBtn = bigBtn(pauseLabel, theme.keyBg) {
+            if (!state.running) return@bigBtn   // Pause is meaningless while stopped.
+            if (state.paused) AutoTypeEngine.resume() else AutoTypeEngine.pause()
+        }
+        // Visually dim the Pause button when not actionable so users can
+        // tell at a glance it's a no-op until Auto-Type is running.
+        if (!state.running) pauseBtn.alpha = 0.45f
+        rowAct.addView(startStopBtn,
+            LayoutParams(0, LayoutParams.MATCH_PARENT, 2f).apply { setMargins(0, 0, dp(8), 0) })
+        rowAct.addView(pauseBtn, LayoutParams(0, LayoutParams.MATCH_PARENT, 1f))
+        root.addView(rowAct)
+
+        // ===== BACK ROW =====  Return to the keys panel.
+        root.addView(pillBtn("⌨ Back to keyboard") { showKeysPanel() },
+            LayoutParams(LayoutParams.MATCH_PARENT, dp(40)).apply { topMargin = dp(10) })
+
+        state.lastError?.let {
+            root.addView(TextView(context).apply {
+                text = "⚠ $it"
+                setTextColor(Color.parseColor("#FF6A6A"))
+                textSize = 11f
+                setPadding(0, dp(6), 0, 0)
+            })
+        }
+
+        panelContainer.addView(root, FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+    }
+
+    private fun pillBtn(label: String, onClick: () -> Unit): TextView = TextView(context).apply {
+        text = label
+        setTextColor(theme.keyText)
+        setTypeface(typeface)
+        gravity = Gravity.CENTER
+        textSize = 13f
+        setPadding(dp(8), dp(6), dp(8), dp(6))
+        background = makeKeyBackground(theme.keyBg, "rounded", 1f)
+        val lp = LayoutParams(0, LayoutParams.MATCH_PARENT, 1f).apply { setMargins(dp(2), dp(4), dp(2), dp(4)) }
+        layoutParams = lp
+        setOnClickListener { onClick() }
+    }
+
+    private fun bigBtn(label: String, bg: Int, onClick: () -> Unit): TextView = TextView(context).apply {
+        text = label
+        setTextColor(if (bg == theme.accent) Color.BLACK else theme.keyText)
+        gravity = Gravity.CENTER
+        textSize = 14f
+        setTypeface(typeface, Typeface.BOLD)
+        background = makeKeyBackground(bg, "rounded", 1f)
+        val lp = LayoutParams(0, LayoutParams.MATCH_PARENT, 1f).apply { setMargins(dp(3), dp(4), dp(3), dp(4)) }
+        layoutParams = lp
+        setOnClickListener { onClick() }
+    }
+
+    private fun doFeedback(v: View) {
+        if (prefs.getBoolean(SettingsStore.KEY_HAPTIC, true)) {
+            val intensity = prefs.getInt(SettingsStore.KEY_HAPTIC_INTENSITY, 50)
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && vibrator != null) {
+                    vibrator.vibrate(VibrationEffect.createOneShot(15L, (intensity * 2).coerceIn(1, 255)))
+                } else {
+                    v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                }
+            } catch (_: Exception) { v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP) }
+        }
+        // ===== Click sound (issue #4) =====
+        // Use AudioManager.playSoundEffect with an explicit volume so the
+        // keyboard tap is reliably audible even when the View's own
+        // playSoundEffect path is gated (some launchers / IME hosts
+        // disable view sound effects globally). FX_KEYPRESS_STANDARD is
+        // the standard "tap" sound the system ships for IMEs — sounds
+        // identical to Gboard / SwiftKey clicks.
+        if (prefs.getBoolean(SettingsStore.KEY_SOUND, false)) {
+            try {
+                val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+                val vol = (prefs.getInt(SettingsStore.KEY_SOUND_VOLUME, 35) / 100f).coerceIn(0.05f, 1f)
+                am?.playSoundEffect(AudioManager.FX_KEYPRESS_STANDARD, vol)
+                // Belt-and-suspenders fallback to the View-level click —
+                // some Android skins only honour one path or the other.
+                v.playSoundEffect(android.view.SoundEffectConstants.CLICK)
+            } catch (_: Exception) {
+                v.playSoundEffect(android.view.SoundEffectConstants.CLICK)
+            }
+        }
+    }
+
+    private fun makeKeyBackground(color: Int, borderStyle: String, opacity: Float): GradientDrawable {
+        val a = (Color.alpha(color) * opacity).toInt().coerceIn(0, 255)
+        // ===== v1.7 — soft vertical gradient for the 3D pill look =====
+        // Top of the key is rendered ~10 % lighter, bottom ~10 % darker.
+        // Combined with View.elevation (set by the touch handler) this
+        // produces the soft glossy pill that Gboard / SwiftKey ship —
+        // a flat solid colour read as cheap / "stickered on" in the
+        // user's screenshot. Falls back to a solid colour when the
+        // requested opacity is 0 (fully transparent keys over a custom
+        // background image — the mode where keys must vanish entirely).
+        val r = Color.red(color); val g = Color.green(color); val b = Color.blue(color)
+        val top = Color.argb(a,
+            (r + (255 - r) * 0.10f).toInt().coerceIn(0, 255),
+            (g + (255 - g) * 0.10f).toInt().coerceIn(0, 255),
+            (b + (255 - b) * 0.10f).toInt().coerceIn(0, 255)
+        )
+        val bottom = Color.argb(a,
+            (r * 0.88f).toInt().coerceIn(0, 255),
+            (g * 0.88f).toInt().coerceIn(0, 255),
+            (b * 0.88f).toInt().coerceIn(0, 255)
+        )
+        val d = if (a == 0) {
+            GradientDrawable().apply { setColor(Color.TRANSPARENT) }
+        } else {
+            GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(top, bottom))
+        }
+        d.cornerRadius = when (borderStyle) {
+            "none" -> 0f
+            "thin" -> dp(6).toFloat()
+            "thick" -> dp(4).toFloat()
+            else -> dp(12).toFloat() // bumped 8→12 dp for softer pill shape
+        }
+        when (borderStyle) {
+            "thin" -> d.setStroke(dp(1), Color.argb(80, 255, 255, 255))
+            "thick" -> d.setStroke(dp(2), Color.argb(120, 255, 255, 255))
+        }
+        return d
+    }
+
+    // ===== ON-KEYBOARD FONT PICKER (popup) =====
+    private fun showFontPicker(anchor: View) {
+        val all: List<FontEntry> = FontManager.all(context)
+        val activePath = FontManager.activePath(context)
+
+        val container = ScrollView(context).apply {
+            setBackgroundColor(theme.keyboardBg)
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+        }
+        val list = LinearLayout(context).apply { orientation = VERTICAL }
+
+        // Bold / Italic toggles row
+        val toggleRow = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, dp(40))
+        }
+        val boldOn = prefs.getBoolean(SettingsStore.KEY_FONT_BOLD, false)
+        val italicOn = prefs.getBoolean(SettingsStore.KEY_FONT_ITALIC, false)
+        val popupRef = arrayOfNulls<PopupWindow>(1)
+        toggleRow.addView(makePill(if (boldOn) "Bold ✓" else "Bold ✗") {
+            prefs.edit().putBoolean(SettingsStore.KEY_FONT_BOLD, !boldOn).apply()
+            reload()
+            popupRef[0]?.dismiss()
+        }, LayoutParams(0, LayoutParams.MATCH_PARENT, 1f))
+        toggleRow.addView(makePill(if (italicOn) "Italic ✓" else "Italic ✗") {
+            prefs.edit().putBoolean(SettingsStore.KEY_FONT_ITALIC, !italicOn).apply()
+            reload()
+            popupRef[0]?.dismiss()
+        }, LayoutParams(0, LayoutParams.MATCH_PARENT, 1f))
+        toggleRow.addView(makePill("Default") {
+            FontManager.setActive(context, null)
+            prefs.edit()
+                .putBoolean(SettingsStore.KEY_FONT_BOLD, false)
+                .putBoolean(SettingsStore.KEY_FONT_ITALIC, false)
+                .apply()
+            reload()
+            Toast.makeText(context, "Font reset to system default", Toast.LENGTH_SHORT).show()
+            popupRef[0]?.dismiss()
+        }, LayoutParams(0, LayoutParams.MATCH_PARENT, 1f))
+        list.addView(toggleRow)
+
+        // ============ Output styles (Unicode) ============
+        // The .ttf files below only change how the keyboard ITSELF looks.
+        // Chat apps (WhatsApp, Insta, Messenger, etc.) draw incoming text
+        // with their own typeface, so a .ttf cannot influence what the
+        // recipient sees. Only Unicode variant letters travel intact.
+        // → Pick an Output Style here to make typed text actually look fancy
+        //   in any chat app. Reset by picking "Normal".
+        list.addView(sectionHeader("Output style (works in chat apps)"))
+        val activeStyleId = prefs.getString(SettingsStore.KEY_FONT_STYLE, "normal")
+        // Use STYLES_ALL (native Unicode styles + one entry per built-in
+        // typeface). The typeface-named entries map each font to its
+        // closest Unicode transform so picking "Lobster · Script" from
+        // here actually produces script-styled text in WhatsApp / Insta
+        // etc., instead of falling back to the chat app's default font.
+        UnicodeFonts.STYLES_ALL.forEach { st ->
+            list.addView(unicodeStyleRow(st, st.id == activeStyleId) {
+                UnicodeFonts.setActive(context, st.id)
+                Toast.makeText(context, "Output style: ${st.name}", Toast.LENGTH_SHORT).show()
+                popupRef[0]?.dismiss()
+            })
+        }
+
+        // ===== Keyboard typeface section (39 built-in fonts) — REMOVED =====
+        // The bundled fonts used to be listed here as a separate "Keyboard
+        // typeface" section so the user could change how the keys themselves
+        // are drawn. Per user request the entire list was hidden because the
+        // same 39 entries are already exposed (mapped to their closest
+        // Unicode equivalents) in the "Output style (works in chat apps)"
+        // section above — keeping both produced 39 lines of duplicates the
+        // user had to scroll past every time they opened the picker.
+        //
+        // BuiltInFonts.ALL is intentionally left intact: UnicodeFonts builds
+        // its TYPEFACE_STYLES list from it, FontManager.byPath() still uses
+        // it to render the user's existing saved keyboard typeface (so a
+        // selection made before this UI cleanup keeps drawing the same way),
+        // and the "Default" pill in the toggle row above can still reset the
+        // keyboard back to system Roboto. Custom .ttf files the user uploads
+        // themselves are still listed below.
+
+        val custom = all.filter { !it.builtIn }
+        if (custom.isNotEmpty()) {
+            list.addView(sectionHeader("Custom fonts (${custom.size})"))
+            custom.forEach { f ->
+                list.addView(fontRow(f, activePath == f.path) {
+                    FontManager.setActive(context, f.path)
+                    reload()
+                    Toast.makeText(context, "Font: ${f.name}", Toast.LENGTH_SHORT).show()
+                    popupRef[0]?.dismiss()
+                })
+            }
+        }
+
+        // Footer note
+        val note = TextView(context).apply {
+            text = "Tip: change the active font from Settings → Theme tab"
+            setTextColor(Color.LTGRAY); textSize = 10f
+            setPadding(dp(6), dp(8), dp(6), dp(4))
+        }
+        list.addView(note)
+
+        container.addView(list)
+
+        val popupWidth = (resources.displayMetrics.widthPixels * 0.92f).toInt()
+        val popupHeight = (resources.displayMetrics.heightPixels * 0.55f).toInt()
+        val popup = PopupWindow(container, popupWidth, popupHeight, true).apply {
+            elevation = dp(8).toFloat()
+            isOutsideTouchable = true
+            setBackgroundDrawable(GradientDrawable().apply {
+                setColor(theme.keyboardBg)
+                cornerRadius = dp(12).toFloat()
+                setStroke(dp(1), theme.accent)
+            })
+        }
+        popupRef[0] = popup
+        try {
+            popup.showAtLocation(this, Gravity.CENTER, 0, -dp(40))
+        } catch (_: Throwable) { /* if anchor not attached yet */ }
+    }
+
+    private fun fontRow(f: FontEntry, isActive: Boolean, onTap: () -> Unit): LinearLayout {
+        val row = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, dp(48))
+            background = makeKeyBackground(
+                if (isActive) theme.accent else theme.keyBg, "rounded", 1f
+            )
+            setPadding(dp(10), 0, dp(10), 0)
+            val lp = layoutParams as LayoutParams
+            lp.setMargins(0, dp(3), 0, dp(3))
+            layoutParams = lp
+            setOnClickListener { onTap() }
+        }
+        // Preview using that font — share the same robust loader the
+        // keyboard uses so the picker preview matches what the user
+        // will actually see on the keys after tapping.
+        val previewTf: Typeface = try {
+            if (BuiltInFonts.isBuiltIn(f.path)) {
+                BuiltInFonts.byPath(f.path)?.let { BuiltInFonts.typefaceFor(context, it) } ?: Typeface.DEFAULT
+            } else {
+                FontManager.loadCustomTypeface(f.path) ?: Typeface.DEFAULT
+            }
+        } catch (_: Throwable) { Typeface.DEFAULT }
+
+        val name = TextView(context).apply {
+            text = f.name
+            setTextColor(if (isActive) Color.BLACK else theme.keyText)
+            textSize = 14f
+            gravity = Gravity.CENTER_VERTICAL
+            setTypeface(previewTf)
+        }
+        val sample = TextView(context).apply {
+            text = "Aa Bb 123"
+            setTextColor(if (isActive) Color.BLACK else Color.LTGRAY)
+            textSize = 14f
+            gravity = Gravity.CENTER_VERTICAL or Gravity.END
+            setTypeface(previewTf)
+        }
+        row.addView(name, LayoutParams(0, LayoutParams.MATCH_PARENT, 1f))
+        row.addView(sample, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.MATCH_PARENT))
+        return row
+    }
+
+    /**
+     * Row in the font picker that represents one Unicode "output style"
+     * (Bold, Italic, Script, …). Tapping it sets the active style; the next
+     * key the user presses goes to the field as that variant Unicode glyph.
+     */
+    private fun unicodeStyleRow(style: UnicodeFonts.Style, isActive: Boolean, onTap: () -> Unit): LinearLayout {
+        val row = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, dp(46))
+            background = makeKeyBackground(
+                if (isActive) theme.accent else theme.keyBg, "rounded", 1f
+            )
+            setPadding(dp(10), 0, dp(10), 0)
+            val lp = layoutParams as LayoutParams
+            lp.setMargins(0, dp(3), 0, dp(3))
+            layoutParams = lp
+            setOnClickListener { onTap() }
+        }
+        val name = TextView(context).apply {
+            text = style.name + if (isActive) "  ✓" else ""
+            setTextColor(if (isActive) Color.BLACK else theme.keyText)
+            textSize = 13f
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        // Right-side preview rendered in the actual Unicode glyphs so the
+        // user can see what their messages will look like before they pick.
+        val sample = TextView(context).apply {
+            text = style.sample
+            setTextColor(if (isActive) Color.BLACK else Color.WHITE)
+            textSize = 16f
+            gravity = Gravity.CENTER_VERTICAL or Gravity.END
+        }
+        row.addView(name, LayoutParams(0, LayoutParams.MATCH_PARENT, 1.2f))
+        row.addView(sample, LayoutParams(0, LayoutParams.MATCH_PARENT, 1f))
+        return row
+    }
+
+    private fun sectionHeader(text: String): TextView = TextView(context).apply {
+        this.text = text
+        setTextColor(theme.accent)
+        setTypeface(typeface, Typeface.BOLD)
+        textSize = 12f
+        setPadding(dp(4), dp(10), dp(4), dp(4))
+    }
+
+    private fun makePill(label: String, onClick: () -> Unit): TextView = TextView(context).apply {
+        text = label
+        setTextColor(theme.keyText)
+        gravity = Gravity.CENTER
+        textSize = 12f
+        background = makeKeyBackground(theme.keyBg, "rounded", 1f)
+        val lp = LayoutParams(0, LayoutParams.MATCH_PARENT, 1f).apply { setMargins(dp(3), dp(4), dp(3), dp(4)) }
+        layoutParams = lp
+        setOnClickListener { onClick() }
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        // v1.10 — start the 1 Hz WPM refresh tick when the keyboard is on
+        // screen. The ticker is the ONLY thing that fades the badge back
+        // to "—" after the user pauses typing for >IDLE_MS — without it
+        // the last computed value would just stick on screen forever.
+        startWpmTicker()
+    }
+
+    override fun onDetachedFromWindow() {
+        super.onDetachedFromWindow()
+        atObserver?.cancel()
+        wpmTicker?.cancel()
+        wpmTicker = null
+        scope.cancel()
+    }
+
+    /**
+     * v1.10 — Pull the latest reading from [WpmTracker] and re-render the
+     * little badge next to the ≡ menu button.
+     *
+     * Called from two places:
+     *   1. The 1 Hz coroutine ticker started in [onAttachedToWindow] —
+     *      handles the IDLE → "—" transition without needing a key event.
+     *   2. The IME service's [FlexboardIMEService.handleKey] — pushes an
+     *      immediate refresh on every productive keystroke so the user
+     *      sees the speed move in real time as they type.
+     *
+     * No-op when [wpmView] hasn't been initialised yet (early attach
+     * order on some launchers calls onAttachedToWindow before the strip
+     * is built).
+     */
+    fun refreshWpm() {
+        if (!::wpmView.isInitialized) return
+        val number = if (WpmTracker.isIdle()) "—" else WpmTracker.currentWpm().toString()
+        wpmView.text = "$number\nWPM"
+    }
+
+    private fun startWpmTicker() {
+        wpmTicker?.cancel()
+        wpmTicker = scope.launch {
+            while (true) {
+                refreshWpm()
+                kotlinx.coroutines.delay(1_000L)
+            }
+        }
+    }
+
+    // ===================== CLIPBOARD POPUP =====================
+    /**
+     * Shows the clipboard history as a floating popup over the keyboard so the
+     * user can paste any item without leaving the typing flow. Long-pressing
+     * an item opens an action sheet (Copy / Pin / Delete).
+     */
+    private fun showClipboardPopup() {
+        val ctx = context
+        val dao = AppDatabase.get(ctx).clipboardDao()
+        val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+
+        val container = LinearLayout(ctx).apply {
+            orientation = VERTICAL
+            setBackgroundColor(theme.keyboardBg)
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+        }
+
+        val header = LinearLayout(ctx).apply { orientation = HORIZONTAL }
+        val title = TextView(ctx).apply {
+            text = "Clipboard"
+            setTextColor(theme.accent)
+            setTypeface(typeface, Typeface.BOLD)
+            textSize = 14f
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        header.addView(title, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
+
+        val scroll = ScrollView(ctx)
+        val list = LinearLayout(ctx).apply { orientation = VERTICAL }
+        scroll.addView(list)
+
+        val popupHeight = dp(260)
+        val popup = PopupWindow(container, width, popupHeight, true).apply {
+            setBackgroundDrawable(ColorDrawable(theme.keyboardBg))
+            elevation = dp(8).toFloat()
+            isOutsideTouchable = true
+        }
+
+        fun renderItems(items: List<ClipboardItem>) {
+            list.removeAllViews()
+            if (items.isEmpty()) {
+                val empty = TextView(ctx).apply {
+                    text = "Clipboard is empty.\nCopy something from any app and it will appear here."
+                    setTextColor(theme.keyText)
+                    setTypeface(typeface)
+                    textSize = 13f
+                    gravity = Gravity.CENTER
+                    setPadding(dp(16), dp(24), dp(16), dp(24))
+                }
+                list.addView(empty)
+                return
+            }
+            items.forEach { item ->
+                val row = LinearLayout(ctx).apply {
+                    orientation = HORIZONTAL
+                    background = makeKeyBackground(theme.keyBg, "rounded", 1f)
+                    val lp = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
+                    lp.setMargins(0, dp(3), 0, dp(3))
+                    layoutParams = lp
+                    setPadding(dp(10), dp(8), dp(10), dp(8))
+                }
+                val itemView = TextView(ctx).apply {
+                    text = (if (item.pinned) "📌 " else "") + item.text.take(140)
+                    setTextColor(theme.keyText)
+                    setTypeface(typeface)
+                    textSize = 13f
+                    maxLines = 3
+                }
+                val pasteBtn = TextView(ctx).apply {
+                    text = "Paste"
+                    setTextColor(theme.accent)
+                    setTypeface(typeface, Typeface.BOLD)
+                    textSize = 12f
+                    gravity = Gravity.CENTER
+                    setPadding(dp(10), dp(6), dp(10), dp(6))
+                    setOnClickListener {
+                        commitToField(item.text)
+                        popup.dismiss()
+                    }
+                }
+                row.addView(itemView, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
+                row.addView(pasteBtn, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
+
+                row.setOnLongClickListener {
+                    showClipItemMenu(item, dao, cm) {
+                        // re-render after action
+                        scope.launch {
+                            val refreshed = withContext(Dispatchers.IO) { dao.allOnce() }
+                            renderItems(refreshed)
+                        }
+                    }
+                    true
+                }
+                list.addView(row)
+            }
+        }
+
+        // Footer with "Manage all" + close
+        val footer = LinearLayout(ctx).apply {
+            orientation = HORIZONTAL
+            val lp = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
+            lp.topMargin = dp(6)
+            layoutParams = lp
+        }
+        val manage = TextView(ctx).apply {
+            text = "Manage all"
+            setTextColor(theme.accent)
+            setTypeface(typeface)
+            textSize = 12f
+            gravity = Gravity.CENTER
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            setOnClickListener {
+                popup.dismiss()
+                onClipboardOpen()
+            }
+        }
+        val close = TextView(ctx).apply {
+            text = "Close"
+            setTextColor(theme.keyText)
+            setTypeface(typeface)
+            textSize = 12f
+            gravity = Gravity.CENTER
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            setOnClickListener { popup.dismiss() }
+        }
+        footer.addView(manage, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
+        footer.addView(close, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
+
+        container.addView(header, LayoutParams(LayoutParams.MATCH_PARENT, dp(28)))
+        container.addView(scroll, LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f))
+        container.addView(footer)
+
+        popup.showAtLocation(this, Gravity.BOTTOM, 0, 0)
+        // Initial fetch — we use a single suspend snapshot rather than the
+        // Flow because the popup is short-lived and re-renders happen on
+        // explicit user action (paste/pin/delete).
+        scope.launch {
+            val items = withContext(Dispatchers.IO) { dao.allOnce() }
+            renderItems(items)
+        }
+    }
+
+    private fun showClipItemMenu(
+        item: ClipboardItem,
+        dao: com.flexboard.data.db.ClipboardDao,
+        cm: android.content.ClipboardManager,
+        onChanged: () -> Unit
+    ) {
+        val ctx = context
+        val container = LinearLayout(ctx).apply {
+            orientation = VERTICAL
+            setBackgroundColor(theme.keyboardBg)
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+        }
+        val popup = PopupWindow(container, dp(180), LayoutParams.WRAP_CONTENT, true).apply {
+            setBackgroundDrawable(ColorDrawable(theme.keyboardBg))
+            elevation = dp(8).toFloat()
+            isOutsideTouchable = true
+        }
+        fun action(label: String, run: () -> Unit) {
+            container.addView(TextView(ctx).apply {
+                text = label
+                setTextColor(theme.keyText)
+                setTypeface(typeface)
+                textSize = 14f
+                setPadding(dp(8), dp(10), dp(8), dp(10))
+                setOnClickListener { run(); popup.dismiss() }
+            })
+        }
+        action("Paste") {
+            commitToField(item.text)
+        }
+        action("Copy to clipboard") {
+            // Tell the watcher this is an intentional re-copy so it
+            // doesn't add a duplicate row to clipboard history.
+            com.flexboard.utils.ClipboardWatcher.suppressNext(item.text)
+            cm.setPrimaryClip(android.content.ClipData.newPlainText("flexboard", item.text))
+            Toast.makeText(ctx, "Copied", Toast.LENGTH_SHORT).show()
+        }
+        action(if (item.pinned) "Unpin" else "Pin") {
+            scope.launch {
+                withContext(Dispatchers.IO) { dao.update(item.copy(pinned = !item.pinned)) }
+                onChanged()
+            }
+        }
+        action("Delete") {
+            scope.launch {
+                withContext(Dispatchers.IO) { dao.delete(item) }
+                onChanged()
+            }
+        }
+        popup.showAtLocation(this, Gravity.CENTER, 0, 0)
+    }
+
+
+    /**
+     * Long-press on backspace pops this menu (issue #2). Each row routes
+     * back through the normal onKey channel so FlexboardIMEService can
+     * call performContextMenuAction on the live InputConnection — keeps
+     * IPC and selection bookkeeping in one place.
+     */
+    private fun showBackspaceMenu(anchor: View) {
+        val ctx = context
+        val container = LinearLayout(ctx).apply {
+            orientation = VERTICAL
+            setBackgroundColor(theme.keyboardBg)
+            setPadding(dp(4), dp(4), dp(4), dp(4))
+        }
+        val popup = PopupWindow(container, dp(190), LayoutParams.WRAP_CONTENT, true).apply {
+            setBackgroundDrawable(ColorDrawable(theme.keyboardBg))
+            elevation = dp(8).toFloat()
+            isOutsideTouchable = true
+        }
+        fun row(label: String, key: KeyDef) {
+            container.addView(TextView(ctx).apply {
+                text = label
+                setTextColor(theme.keyText)
+                setTypeface(typeface)
+                textSize = 15f
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(14), dp(10), dp(14), dp(10))
+                setOnClickListener {
+                    popup.dismiss()
+                    onKey(key)
+                }
+            }, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+        }
+        row("⬚  Select All", KeyDef("selAll", "selAll", type = KeyType.SELECT_ALL))
+        row("📋  Copy",       KeyDef("copy",   "copy",   type = KeyType.COPY))
+        row("✂  Cut",         KeyDef("cut",    "cut",    type = KeyType.CUT))
+        row("📥  Paste",      KeyDef("paste",  "paste",  type = KeyType.PASTE))
+        row("⌫  Delete one",  KeyDef("⌫",      "back",   type = KeyType.BACKSPACE))
+        // Show ABOVE the backspace key so it doesn't get clipped under the
+        // (already short) keyboard area.
+        val loc = IntArray(2); anchor.getLocationOnScreen(loc)
+        popup.showAtLocation(this, Gravity.NO_GRAVITY,
+            loc[0] - dp(140), loc[1] - dp(220))
+    }
+}

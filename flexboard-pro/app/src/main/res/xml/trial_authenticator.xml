@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Stub account authenticator for FlexBoard Pro trial persistence.
+  This account type exists solely to store the trial-start timestamp
+  in Android's AccountManagerService database — which lives OUTSIDE
+  the app's data directory and therefore survives both "Clear Data"
+  and app reinstall. It is NOT visible in Settings > Accounts because
+  it carries no user-facing name/icon beyond the minimum required fields.
+-->
+<account-authenticator
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accountType="com.flexboard.trial"
+    android:label="@string/app_name"
+    android:smallIcon="@mipmap/ic_launcher"
+    android:icon="@mipmap/ic_launcher"/>

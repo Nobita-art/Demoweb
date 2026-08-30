@@ -1,0 +1,301 @@
+================================================================================
+FLEXBOARD PRO — HARDENING & APPROVAL SYSTEM
+Prompt for Replit Agent (next session)
+WhatsApp contact for approval requests: +923001677853
+================================================================================
+
+CONTEXT
+-------
+FlexBoard Pro is a native Android keyboard (Kotlin + Jetpack Compose IME) at
+`flexboard-pro/`. The owner (single developer, Kashif Raza) wants TWO things
+done in one combined task:
+
+  A) The TOUGHEST possible tamper-resistance so a malicious user cannot
+     decompile the APK, change branding / about info / "Kashif Raza" text /
+     contact links, and re-distribute it as their own.
+
+  B) A device-ID approval system gated by a GitHub raw JSON file. Only
+     devices whose ID is on the list may use the keyboard. Unapproved users
+     see a lock screen with their device ID + a "Send to admin via WhatsApp"
+     button pointing to +923001677853.
+
+The GitHub raw URL itself must NOT be readable in plain strings inside the
+APK — it must be obfuscated/encrypted and reconstructed at runtime.
+
+This file is the spec / prompt. Read it end-to-end before writing any code.
+The owner is on Replit free tier — be efficient, batch tool calls.
+
+================================================================================
+PART A — TAMPER RESISTANCE (do all of these)
+================================================================================
+
+A1. ENABLE R8 / PROGUARD AT FULL STRENGTH (release build only)
+---------------------------------------------------------------
+File: flexboard-pro/app/build.gradle (or .kts)
+- buildTypes.release.minifyEnabled = true
+- buildTypes.release.shrinkResources = true
+- buildTypes.release.proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+- Add to flexboard-pro/app/proguard-rules.pro:
+    -repackageclasses ''
+    -allowaccessmodification
+    -optimizationpasses 5
+    -overloadaggressively
+    -keepattributes !LocalVariableTable,!LocalVariableTypeTable,!SourceFile,!LineNumberTable
+    # Keep IME entry points (Android needs to load them by name)
+    -keep class com.flexboard.ime.FlexboardIMEService { *; }
+    -keep class com.flexboard.ime.FlexboardAccessibilityService { *; }
+    -keep class com.flexboard.ime.AutoTypeForegroundService { *; }
+    -keep class com.flexboard.ui.MainActivity { *; }
+    # Keep Room entities + DAOs (Room reflects on them)
+    -keep class com.flexboard.data.db.** { *; }
+    # Compose / Coroutines / Kotlin metadata are handled by default rules
+
+A2. SIGNATURE PINNING
+---------------------
+The single strongest anti-repackage check. If a thief decompiles the APK,
+edits branding, and re-signs with their own key, the signature changes →
+app refuses to run.
+
+Steps:
+1. Owner generates a release keystore (one-time, off-Replit):
+     keytool -genkey -v -keystore flexboard-release.jks \
+       -keyalg RSA -keysize 4096 -validity 10000 -alias flexboard
+   He stores it OUTSIDE the repo (Google Drive + USB backup). Losing it
+   means he can never update the same app again.
+
+2. Owner runs ONCE:
+     keytool -list -v -keystore flexboard-release.jks -alias flexboard \
+       | grep "SHA-256:"
+   Copies the colon-separated hex (e.g.  AB:CD:EF:...).
+
+3. Hardcode that SHA-256 inside Kotlin (BUT obfuscated — see A3 below). On
+   every cold start, MainActivity calls SecurityGuard.verifyOrDie(this):
+     val pkg = ctx.packageManager.getPackageInfo(
+         ctx.packageName, PackageManager.GET_SIGNING_CERTIFICATES)
+     val sigs = pkg.signingInfo.apkContentsSigners
+     val actualHash = sha256(sigs[0].toByteArray()).toHex()
+     if (actualHash != EXPECTED_RELEASE_SHA256) {
+         // refuse — see A6 for what "refuse" means
+     }
+
+4. Build.gradle signing config reads keystore path + password from
+   ~/.gradle/gradle.properties (NEVER commit the keystore or password to git).
+
+A3. STRING ENCRYPTION
+---------------------
+All sensitive strings must be encrypted at compile time and decrypted at
+runtime so `strings APK | grep` returns nothing useful. Targets:
+  - The GitHub raw URL of approved.json
+  - The expected release SHA-256
+  - The WhatsApp number +923001677853 (so a thief can't trivially redirect)
+  - The about-info constants ("Kashif Raza", "ATF Team", instagram URL, etc.)
+
+Implementation: small XOR + base64 helper. Each constant stored as base64 of
+(plaintext XOR key) where `key` is itself derived at runtime from the app's
+package name + signing-cert SHA (so even copying the encrypted blobs to
+another APK won't decrypt — the key is signature-bound).
+
+Create: flexboard-pro/app/src/main/java/com/flexboard/security/Obf.kt
+  object Obf {
+      // Each value is base64( plaintext XOR derivedKey(ctx) )
+      const val APPROVED_URL_ENC = "..."
+      const val EXPECTED_SHA_ENC = "..."
+      const val WHATSAPP_ENC      = "..."
+      const val OWNER_NAME_ENC    = "..."
+      // ... etc
+      fun decode(ctx: Context, enc: String): String { ... }
+  }
+
+A small Gradle task or a one-off Kotlin script encrypts the plaintexts and
+prints the base64 blobs the owner pastes back into Obf.kt. The plaintexts
+themselves are kept in a SEPARATE .secrets file (gitignored).
+
+A4. ANTI-DEBUG / ANTI-TAMPER RUNTIME CHECKS
+-------------------------------------------
+SecurityGuard.verifyOrDie(ctx) must check ALL of these. Any failure → die.
+  1. Signature pinning (A2 above).
+  2. ApplicationInfo.flags has NO FLAG_DEBUGGABLE bit set in production.
+  3. Debug.isDebuggerConnected() == false.
+  4. Installer source must be Play Store, owner's website, or any source the
+     owner whitelists. Use PackageManager.getInstallSourceInfo (API 30+).
+     If the user side-loaded from a random WhatsApp APK that came through a
+     repackager, this catches it.
+  5. Reject emulators in production (Build.FINGERPRINT contains "generic",
+     Build.MODEL contains "Emulator", etc.). Soft check — emit warning,
+     don't block, OR block; owner's choice.
+  6. Reject if root binaries exist (su, magisk, busybox in /system/bin or
+     /system/xbin). Soft check.
+
+A5. CERTIFICATE PINNING for the GitHub fetch
+---------------------------------------------
+When fetching approved.json, pin GitHub's certificate so a man-in-the-middle
+on the user's network cannot serve a fake list. Use OkHttp CertificatePinner
+with the current github.com / raw.githubusercontent.com SHA-256 pins.
+
+A6. WHAT "REFUSE TO RUN" MEANS
+-------------------------------
+On any tamper / unapproved-device detection:
+  - The IME service (FlexboardIMEService) refuses to show its keyboard view.
+    Instead it shows a single non-interactive "Locked" view with an "Open
+    settings" link — keeps the user from being silently locked out of their
+    phone (Android forbids removing the only IME).
+  - MainActivity replaces all screens with the LockScreen composable
+    (described in PART B).
+  - DO NOT crash, DO NOT throw — that gets the app blamed for a malware
+    detection. Just show the lock screen.
+
+A7. ABOUT / BRANDING PROTECTION
+-------------------------------
+Currently flexboard-pro/app/src/main/java/com/flexboard/ui/screens/AboutScreen.kt
+hardcodes "Kashif Raza", instagram URL, "ATF Team. All rights reserved."
+
+Change so each of those strings is read via Obf.decode(ctx, Obf.OWNER_NAME_ENC)
+etc. A decompiler will see only base64 blobs. Combined with signature
+pinning, repackaging the APK makes the decryption key wrong → branding
+collapses to garbage on the thief's build, NOT clean text they can edit.
+
+================================================================================
+PART B — APPROVAL SYSTEM
+================================================================================
+
+B1. DEVICE ID
+-------------
+Generate a stable device fingerprint, NOT just ANDROID_ID (that resets on
+factory reset and can be spoofed). Combine:
+  - Settings.Secure.ANDROID_ID
+  - Build.MANUFACTURER + Build.MODEL + Build.DEVICE
+  - sha256(...) → first 16 hex chars (so the ID shown to the user is short
+    and easy to dictate over WhatsApp).
+
+Save the computed ID in EncryptedSharedPreferences ("flexboard_secure")
+under key "device_id" so it stays stable across app sessions.
+
+B2. APPROVED.JSON FORMAT (hosted on GitHub)
+-------------------------------------------
+URL (encrypted in Obf): https://raw.githubusercontent.com/<OWNER>/<REPO>/main/approved.json
+Owner will fill in the real <OWNER>/<REPO> in a follow-up message before
+implementation.
+
+File contents:
+{
+  "version": 1,
+  "approved":  ["abcd1234deadbeef", "1111aaaa2222bbbb"],
+  "blocked":   ["badc0deb1ade1234"],
+  "message":   "Welcome to FlexBoard Pro",
+  "min_app_version": 1
+}
+
+The "blocked" list takes precedence over "approved" (kill-switch).
+
+B3. ON-LAUNCH FLOW
+------------------
+Inside MainActivity.onCreate (BEFORE setContent):
+  1. SecurityGuard.verifyOrDie(this)  ← Part A checks
+  2. ApprovalGate.evaluate(this) returns:
+       Approved        → continue normally
+       Blocked         → LockScreen("Your access has been revoked.")
+       NotApproved     → LockScreen("Awaiting approval.")
+       OfflineUnknown  → If cached approval < 7 days old, treat as Approved.
+                         Else LockScreen("Internet required for first launch.")
+
+ApprovalGate.evaluate:
+  - Read cached state from EncryptedSharedPreferences (last_check_at,
+    last_state, last_etag).
+  - If now - last_check_at < 6 hours AND last_state == Approved → return
+    Approved without touching the network (battery friendly).
+  - Else fetch GitHub raw URL with OkHttp (cert pinned, A5):
+      * On HTTP 200: parse JSON, decide state, cache.
+      * On 304: reuse cached state.
+      * On any failure: fall back to cached state if < 7 days old, else
+        OfflineUnknown.
+
+B4. LOCK SCREEN UI
+------------------
+File: flexboard-pro/app/src/main/java/com/flexboard/ui/screens/LockScreen.kt
+
+Show:
+  - App logo / FlexBoard Pro title (orange accent, matches existing app)
+  - State message ("Awaiting approval", "Access revoked", etc.)
+  - The user's device ID in a big monospace box, tap-to-copy.
+  - Two buttons:
+      [Copy ID]
+      [Send to admin via WhatsApp]   ← opens
+        https://wa.me/923001677853?text=Approval%20request%0AID%3A%20<deviceId>
+  - "Re-check approval" button → forces a fresh fetch.
+
+The WhatsApp number +923001677853 must be loaded via Obf.decode so it isn't
+visible as a plain string in the APK.
+
+B5. BACKEND-LESS ADMIN WORKFLOW
+-------------------------------
+1. User opens app → sees device ID on lock screen → taps WhatsApp button →
+   sends ID to +923001677853.
+2. Owner opens GitHub on phone → edits approved.json → adds the ID under
+   "approved" → commits.
+3. User taps "Re-check approval" (or relaunches) → app fetches updated
+   list → unlocks.
+
+================================================================================
+PART C — IMPLEMENTATION ORDER (for the agent)
+================================================================================
+
+Do these in order. Confirm each milestone briefly before moving on:
+
+  C1. Create flexboard-pro/app/src/main/java/com/flexboard/security/
+        - Obf.kt           (string obfuscation helpers)
+        - SecurityGuard.kt (signature + anti-debug + installer checks)
+        - DeviceId.kt      (stable fingerprint)
+        - ApprovalGate.kt  (network fetch + cache + state machine)
+  C2. Add EncryptedSharedPreferences dependency:
+        implementation("androidx.security:security-crypto:1.1.0-alpha06")
+      and OkHttp:
+        implementation("com.squareup.okhttp3:okhttp:4.12.0")
+  C3. Create flexboard-pro/app/src/main/java/com/flexboard/ui/screens/LockScreen.kt
+  C4. Wire MainActivity.onCreate to call SecurityGuard.verifyOrDie + ApprovalGate
+  C5. Replace AboutScreen hardcoded strings with Obf.decode reads
+  C6. Add IME-side lock view in FlexboardIMEService (Part A6)
+  C7. Enable R8 + write proguard-rules.pro (A1)
+  C8. Add gradle signing config that reads from gradle.properties
+  C9. Provide a small Gradle task `printObfuscatedConstants` so the owner can
+      paste plaintexts and get back base64 blobs to drop into Obf.kt
+  C10. Update flexboard-pro/replit.md with the new architecture notes
+
+INPUTS THE OWNER MUST PROVIDE BEFORE C STARTS
+---------------------------------------------
+  - GitHub username + repo name that will host approved.json
+    (the agent should ASK once before starting C1).
+  - Whether to soft-warn or hard-block on emulator / root detection.
+  - Confirmation that he has generated the release keystore and copied its
+    SHA-256, OR that he wants the agent to walk him through `keytool`.
+
+ITEMS THE OWNER FILLS IN HIMSELF (off-Replit)
+---------------------------------------------
+  - The release keystore file + password (NEVER paste into chat).
+  - The SHA-256 of that keystore (paste into chat — it's not secret).
+  - approved.json initial contents pushed to his GitHub repo.
+
+================================================================================
+QUICK SECURITY MODEL SUMMARY (so the agent doesn't lose the thread)
+================================================================================
+
+What this stops:
+  - Casual decompile-and-rebrand:          BLOCKED by signature pinning + obf
+  - String-grep for the GitHub URL:        BLOCKED by string encryption
+  - MITM serving a fake approved.json:     BLOCKED by certificate pinning
+  - Sharing the APK with non-approved
+    users:                                 BLOCKED by ApprovalGate
+  - Old user revoked from approved list:   ENFORCED within 6-24 h by re-check
+  - Debugger attached to inspect memory:   BLOCKED by anti-debug
+  - Repackaged APK installed via shady
+    third-party store:                     BLOCKED by installer source check
+
+What this does NOT stop (be honest with the owner):
+  - A skilled reverse engineer with hours to spare and access to native
+    debugging can still patch the binary. We're not building bank-grade DRM,
+    we're raising the cost from "5 minutes with apktool" to "hours with
+    professional tools" — enough to deter ~99% of casual thieves.
+  - Owner losing the keystore = cannot ship updates. Backup is critical.
+
+================================================================================
+END OF PROMPT
+================================================================================

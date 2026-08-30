@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">FlexBoard Pro</string>
+    <string name="accessibility_service_description">FlexBoard Pro Auto-Type ko text fields mein automatically messages inject karne ke liye Accessibility access chahiye. Yeh sirf user ke kehne par chalta hai aur internet par koi data nahi bhejta.</string>
+    <string name="ime_label">FlexBoard Pro Keyboard</string>
+    <string name="auto_type_channel">FlexBoard Auto-Type</string>
+</resources>

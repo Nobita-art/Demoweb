@@ -1,0 +1,13 @@
+Assalam o Alaikum bhai, kaise hain aap?
+Yeh FlexBoard Pro ka auto-type test message hai.
+Pehli line type ho rahi hai keyboard se automatically.
+Har line ke beech mein delay hoga jo aapne settings mein set kiya.
+Numbers ka test: 1234567890
+English line: This is a test of the auto type engine.
+Urdu line: میں خیریت سے ہوں، شکریہ۔
+Arabic line: السلام عليكم ورحمة الله
+Symbols test: @#$%^&*()_+-=
+Mixed line: Hello 123 دنیا!
+Loop test ke liye yeh aakhri line hai.
+Agar loop ON hai to phir se pehli line se shuru hoga.
+Auto-type kaam kar raha hai — mubarak ho!

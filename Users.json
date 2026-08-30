@@ -1,0 +1,638 @@
+{
+  "version": 2,
+  "_comment_schema": "FlexBoard Pro v1.11+ schema. Each user under 'approved' MAY include an optional 'plan_until' field (ISO-8601 UTC timestamp). Rules: (a) plan_until missing OR null => LIFETIME access. (b) plan_until in the FUTURE => approved, app shows live countdown. (c) plan_until in the PAST => PlanExpired, keyboard locks and Plans screen opens. (d) ID under 'blocked' => instant lock (wins over approved). The 3-day free trial is local — no entry needed.",
+  "_comment_workflow": "Add a user after they pay via WhatsApp: copy their android_id (they get it on the Plans screen / lock screen and it arrives in the WhatsApp message), pick the right plan_until based on plan: monthly = +30 days, 6mo = +180 days, yearly = +365 days. Use UTC. Lifetime users (e.g. you / testers) — set plan_until to null. The app re-checks every ~5 minutes, so changes here go live within minutes.",
+  "_comment_blocking": "To revoke a user, EITHER remove their entry from 'approved' OR (recommended) move it into 'blocked'. Blocked wins over approved, so 'blocked' is safer if you might re-add the user later.",
+  "_comment_names": "All 'name' fields are placeholders ('xyz'). Replace with the actual buyer name from their WhatsApp message before saving — this just helps you keep track of who paid.",
+  "approved": [
+    {
+      "_comment": "Admin / owner #1 — lifetime access",
+      "android_id": "6f365889e3782d2b",
+      "name": "xyz",
+      "plan": "lifetime",
+      "plan_until": null
+    },
+    {
+      "_comment": "Admin / owner #2 — lifetime access",
+      "android_id": "33b0876deb454b31",
+      "name": "xyz",
+      "plan": "lifetime",
+      "plan_until": null
+    },
+    {
+      "_comment": "Admin / owner #3 — lifetime access",
+      "android_id": "9aa0d0cb45ea8990",
+      "name": "xyz",
+      "plan": "lifetime",
+      "plan_until": null
+    },
+    {
+      "_comment": "Admin / owner #4 — lifetime access",
+      "android_id": "d381f54f88f2e67c",
+      "name": "xyz",
+      "plan": "lifetime",
+      "plan_until": null
+    },
+    {
+      "android_id": "9cb49f1427ca7f15",
+      "name": "xyz",
+      "plan": "halfyear",
+      "plan_until": "2026-05-08T20:19:51Z"
+    },
+    {
+      "android_id": "c9d19e5111f37300",
+      "name": "xyz",
+      "plan": "monthly",
+      "plan_until": "2026-05-04T17:29:04Z"
+    },
+    {
+      "android_id": "0c618c7e091c7866",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2026-07-27T23:15:44Z"
+    },
+    {
+      "android_id": "483b917f551f16e9",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2027-03-29T04:27:06Z"
+    },
+    {
+      "android_id": "285c31ecdde20c2a",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2026-07-25T18:49:18Z"
+    },
+    {
+      "android_id": "f9d9dd94c95a5695",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2027-01-14T15:53:43Z"
+    },
+    {
+      "android_id": "deeb24503c729fce",
+      "name": "xyz",
+      "plan": "monthly",
+      "plan_until": "2026-05-13T04:19:41Z"
+    },
+    {
+      "android_id": "5b3d47d238792f09",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2026-08-30T10:59:05Z"
+    },
+    {
+      "android_id": "ff1dd71cbafcc060",
+      "name": "xyz",
+      "plan": "halfyear",
+      "plan_until": "2026-06-02T22:37:18Z"
+    },
+    {
+      "android_id": "8d0a7ed01d9912b4",
+      "name": "xyz",
+      "plan": "monthly",
+      "plan_until": "2026-05-14T02:11:55Z"
+    },
+    {
+      "android_id": "86244242daf80dee",
+      "name": "xyz",
+      "plan": "monthly",
+      "plan_until": "2026-05-03T03:59:41Z"
+    },
+    {
+      "android_id": "cd7869c1416b415d",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2026-10-09T03:29:51Z"
+    },
+    {
+      "android_id": "4f8832617805decc",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2027-01-20T21:57:23Z"
+    },
+    {
+      "android_id": "045c9998e24e924a",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2027-04-04T01:03:32Z"
+    },
+    {
+      "android_id": "614ccc3763200b94",
+      "name": "xyz",
+      "plan": "halfyear",
+      "plan_until": "2026-07-12T19:46:00Z"
+    },
+    {
+      "android_id": "a6c96e5639907e3b",
+      "name": "xyz",
+      "plan": "monthly",
+      "plan_until": "2026-05-04T07:11:25Z"
+    },
+    {
+      "android_id": "693b0edf497250b8",
+      "name": "xyz",
+      "plan": "halfyear",
+      "plan_until": "2026-07-30T23:07:28Z"
+    },
+    {
+      "android_id": "60758845e2e9c40b",
+      "name": "xyz",
+      "plan": "halfyear",
+      "plan_until": "2026-10-02T01:21:45Z"
+    },
+    {
+      "android_id": "fc58d8131c15e1a0",
+      "name": "xyz",
+      "plan": "monthly",
+      "plan_until": "2026-05-22T05:45:15Z"
+    },
+    {
+      "android_id": "0179ca0ffea742d7",
+      "name": "xyz",
+      "plan": "monthly",
+      "plan_until": "2026-05-04T00:36:24Z"
+    },
+    {
+      "android_id": "4c33ef4e1ac6448f",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2026-08-05T22:50:24Z"
+    },
+    {
+      "android_id": "c51c53d9836fbc90",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2026-09-10T14:06:09Z"
+    },
+    {
+      "android_id": "bd8ffdafaf01f90b",
+      "name": "xyz",
+      "plan": "monthly",
+      "plan_until": "2026-05-17T00:53:35Z"
+    },
+    {
+      "android_id": "744b750a974a3cf0",
+      "name": "xyz",
+      "plan": "halfyear",
+      "plan_until": "2026-08-28T18:57:44Z"
+    },
+    {
+      "android_id": "afa4a25bc73e5949",
+      "name": "xyz",
+      "plan": "monthly",
+      "plan_until": "2026-05-17T03:51:02Z"
+    },
+    {
+      "android_id": "23bc4c31e80a81eb",
+      "name": "xyz",
+      "plan": "halfyear",
+      "plan_until": "2026-05-13T02:55:24Z"
+    },
+    {
+      "android_id": "d0048f014bc8811b",
+      "name": "xyz",
+      "plan": "halfyear",
+      "plan_until": "2026-07-02T12:41:43Z"
+    },
+    {
+      "android_id": "fe4592ee591c1815",
+      "name": "xyz",
+      "plan": "halfyear",
+      "plan_until": "2026-07-15T02:12:48Z"
+    },
+    {
+      "android_id": "3f91729909ac24fa",
+      "name": "xyz",
+      "plan": "halfyear",
+      "plan_until": "2026-07-25T20:08:15Z"
+    },
+    {
+      "android_id": "fbb9525c0200f912",
+      "name": "xyz",
+      "plan": "halfyear",
+      "plan_until": "2026-05-18T23:25:14Z"
+    },
+    {
+      "android_id": "942906f23d4a2f59",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2026-11-20T21:15:05Z"
+    },
+    {
+      "android_id": "dfecd6fea65a9fc4",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2027-04-12T16:23:08Z"
+    },
+    {
+      "android_id": "2adecca19b139538",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2027-01-17T03:22:38Z"
+    },
+    {
+      "android_id": "09d54f9c8dfb9bc2",
+      "name": "xyz",
+      "plan": "halfyear",
+      "plan_until": "2026-07-12T21:31:15Z"
+    },
+    {
+      "android_id": "0697f4cc929693d6",
+      "name": "xyz",
+      "plan": "halfyear",
+      "plan_until": "2026-10-24T13:31:16Z"
+    },
+    {
+      "android_id": "a1817b3a696ec19f",
+      "name": "xyz",
+      "plan": "monthly",
+      "plan_until": "2026-05-27T04:02:12Z"
+    },
+    {
+      "android_id": "274f5cd9cef595fe",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2026-12-06T04:19:36Z"
+    },
+    {
+      "android_id": "3dc81f7a6d66ea70",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2027-03-04T23:52:37Z"
+    },
+    {
+      "android_id": "17b13f61172a5234",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2027-02-03T20:21:44Z"
+    },
+    {
+      "android_id": "e98468dce8f943d4",
+      "name": "xyz",
+      "plan": "halfyear",
+      "plan_until": "2026-09-27T14:57:32Z"
+    },
+    {
+      "android_id": "29091c46dc4e0454",
+      "name": "xyz",
+      "plan": "monthly",
+      "plan_until": "2026-05-28T02:24:23Z"
+    },
+    {
+      "android_id": "44bb529be352f10c",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2026-07-06T19:46:37Z"
+    },
+    {
+      "android_id": "c0c25ec1131d63e8",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2026-06-26T01:23:25Z"
+    },
+    {
+      "android_id": "e1ae3d861a50f181",
+      "name": "xyz",
+      "plan": "monthly",
+      "plan_until": "2026-05-16T18:05:11Z"
+    },
+    {
+      "android_id": "f3346521f859b584",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2027-01-08T13:13:48Z"
+    },
+    {
+      "android_id": "892578510ff05dc6",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2026-11-07T12:49:46Z"
+    },
+    {
+      "android_id": "4faee1afe9646f23",
+      "name": "xyz",
+      "plan": "halfyear",
+      "plan_until": "2026-07-30T19:34:28Z"
+    },
+    {
+      "android_id": "decdda5ef9670bfc",
+      "name": "xyz",
+      "plan": "monthly",
+      "plan_until": "2026-05-05T17:31:00Z"
+    },
+    {
+      "android_id": "c2e1fb29de4dee4f",
+      "name": "xyz",
+      "plan": "monthly",
+      "plan_until": "2026-05-09T18:25:22Z"
+    },
+    {
+      "android_id": "0226226fadd5d1f3",
+      "name": "xyz",
+      "plan": "monthly",
+      "plan_until": "2026-05-09T07:36:41Z"
+    },
+    {
+      "android_id": "25159c58964a9243",
+      "name": "xyz",
+      "plan": "halfyear",
+      "plan_until": "2026-10-05T07:04:37Z"
+    },
+    {
+      "android_id": "8203f4e2c3c65bea",
+      "name": "xyz",
+      "plan": "halfyear",
+      "plan_until": "2026-05-18T14:18:14Z"
+    },
+    {
+      "android_id": "d5e1f29254d02ade",
+      "name": "xyz",
+      "plan": "halfyear",
+      "plan_until": "2026-08-03T15:44:06Z"
+    },
+    {
+      "android_id": "09b3a0b80752a496",
+      "name": "xyz",
+      "plan": "monthly",
+      "plan_until": "2026-05-15T19:40:26Z"
+    },
+    {
+      "android_id": "c06989e63874b7b4",
+      "name": "xyz",
+      "plan": "halfyear",
+      "plan_until": "2026-07-14T22:09:07Z"
+    },
+    {
+      "android_id": "549501e7586fc69f",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2026-07-15T19:26:54Z"
+    },
+    {
+      "android_id": "33f60d3cd73f029b",
+      "name": "xyz",
+      "plan": "halfyear",
+      "plan_until": "2026-05-09T07:05:25Z"
+    },
+    {
+      "android_id": "40a92c919327e570",
+      "name": "xyz",
+      "plan": "monthly",
+      "plan_until": "2026-05-24T16:54:26Z"
+    },
+    {
+      "android_id": "2b884751940ca4e6",
+      "name": "xyz",
+      "plan": "monthly",
+      "plan_until": "2026-05-25T01:27:39Z"
+    },
+    {
+      "android_id": "037e14573e93231c",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2027-02-25T06:20:54Z"
+    },
+    {
+      "android_id": "74a85eaeaff1673c",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2026-08-14T02:45:37Z"
+    },
+    {
+      "android_id": "1b5284bc6bb25251",
+      "name": "xyz",
+      "plan": "halfyear",
+      "plan_until": "2026-08-03T16:21:28Z"
+    },
+    {
+      "android_id": "24800895ecfbed7f",
+      "name": "xyz",
+      "plan": "halfyear",
+      "plan_until": "2026-08-05T07:15:32Z"
+    },
+    {
+      "android_id": "7a6320b2401f6c72",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2026-07-13T06:08:17Z"
+    },
+    {
+      "android_id": "d65982f8428f907c",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2027-04-28T09:09:13Z"
+    },
+    {
+      "android_id": "425bee91b96d5638",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2026-09-07T12:26:47Z"
+    },
+    {
+      "android_id": "5b6e8acfd114eef8",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2026-05-04T12:32:16Z"
+    },
+    {
+      "android_id": "4d5edd6d021b99de",
+      "name": "xyz",
+      "plan": "halfyear",
+      "plan_until": "2026-05-18T20:29:34Z"
+    },
+    {
+      "android_id": "518322d4ca657d0c",
+      "name": "xyz",
+      "plan": "halfyear",
+      "plan_until": "2026-10-20T04:48:32Z"
+    },
+    {
+      "android_id": "a97cfc5c3fc8f73e",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2026-12-28T04:25:32Z"
+    },
+    {
+      "android_id": "006f5b558a443e41",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2026-05-24T13:19:03Z"
+    },
+    {
+      "android_id": "b98c48908538f6e7",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2026-05-05T00:18:14Z"
+    },
+    {
+      "android_id": "b980840818d050ce",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2026-11-25T14:24:39Z"
+    },
+    {
+      "android_id": "88ab25d9a9a2fe05",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2026-06-19T02:25:14Z"
+    },
+    {
+      "android_id": "368b049ecf20cc01",
+      "name": "xyz",
+      "plan": "monthly",
+      "plan_until": "2026-05-15T05:23:21Z"
+    },
+    {
+      "android_id": "f182db89e011b82f",
+      "name": "xyz",
+      "plan": "halfyear",
+      "plan_until": "2026-07-22T15:40:04Z"
+    },
+    {
+      "android_id": "6851cb6e6580b644",
+      "name": "xyz",
+      "plan": "halfyear",
+      "plan_until": "2026-10-02T04:34:49Z"
+    },
+    {
+      "android_id": "b8fbe2f179193ca0",
+      "name": "xyz",
+      "plan": "halfyear",
+      "plan_until": "2026-05-01T14:26:03Z"
+    },
+    {
+      "android_id": "4eba3a4092477b39",
+      "name": "xyz",
+      "plan": "monthly",
+      "plan_until": "2026-05-01T06:07:27Z"
+    },
+    {
+      "android_id": "f52946409c5482df",
+      "name": "xyz",
+      "plan": "monthly",
+      "plan_until": "2026-05-24T03:58:24Z"
+    },
+    {
+      "android_id": "02c276497878b60a",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2026-08-06T09:01:36Z"
+    },
+    {
+      "android_id": "91d6c3aba175de04",
+      "name": "xyz",
+      "plan": "halfyear",
+      "plan_until": "2026-08-10T01:38:35Z"
+    },
+    {
+      "android_id": "f7f19de495993db6",
+      "name": "xyz",
+      "plan": "monthly",
+      "plan_until": "2026-05-21T07:40:29Z"
+    },
+    {
+      "android_id": "6035ef49f83a3602",
+      "name": "xyz",
+      "plan": "monthly",
+      "plan_until": "2026-05-02T07:09:08Z"
+    },
+    {
+      "android_id": "d27bc2fc504cb911",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2027-03-02T10:36:38Z"
+    },
+    {
+      "android_id": "58ba4c4f2612d51a",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2027-04-16T19:20:35Z"
+    },
+    {
+      "android_id": "3b675cfa68a9c1d7",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2027-01-10T13:16:03Z"
+    },
+    {
+      "android_id": "2ce7e660a58af618",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2026-09-15T11:47:55Z"
+    },
+    {
+      "android_id": "88a8864cb73de52f",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2027-02-15T04:25:15Z"
+    },
+    {
+      "android_id": "0d6153b8b0c85d29",
+      "name": "xyz",
+      "plan": "monthly",
+      "plan_until": "2026-05-06T14:30:45Z"
+    },
+    {
+      "android_id": "9d8fe16388e06444",
+      "name": "xyz",
+      "plan": "monthly",
+      "plan_until": "2026-05-27T21:51:30Z"
+    },
+    {
+      "android_id": "4e98333371503caf",
+      "name": "xyz",
+      "plan": "monthly",
+      "plan_until": "2026-05-02T05:48:27Z"
+    },
+    {
+      "android_id": "4629c043d8057e7b",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2026-09-09T01:29:13Z"
+    },
+    {
+      "android_id": "0301ae185edcc91e",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2026-11-29T17:33:12Z"
+    },
+    {
+      "android_id": "3b3474068ca607ce",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2026-12-31T16:10:47Z"
+    },
+    {
+      "android_id": "cce656d8795da839",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2026-08-11T15:56:09Z"
+    },
+    {
+      "android_id": "39c9b12716b31250",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2026-12-08T16:44:35Z"
+    },
+    {
+      "android_id": "bc9dae6fe1f09e05",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2026-06-19T23:07:01Z"
+    },
+    {
+      "android_id": "97c536e2a7cbc4a7",
+      "name": "xyz",
+      "plan": "yearly",
+      "plan_until": "2026-08-13T23:45:55Z"
+    },
+    {
+      "android_id": "6357fef64bb1e00b",
+      "name": "xyz",
+      "plan": "halfyear",
+      "plan_until": "2026-07-28T06:18:19Z"
+    }
+  ],
+  "blocked": []
+}

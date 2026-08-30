@@ -1,0 +1,20 @@
+*.iml
+.gradle/
+/local.properties
+/.idea/
+.DS_Store
+/build
+/app/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+*.apk
+*.aab
+*.keystore
+# Release keystore is for the Android sign job — do NOT commit the
+# raw .jks or its base64 export. They are passed in via GitHub Secrets
+# (see .github/workflows/android-build.yml).
+keystore/flexboard-release.jks
+keystore/flexboard-release.jks.base64.txt
+keystore.properties

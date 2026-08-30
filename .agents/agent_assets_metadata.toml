@@ -1,0 +1,14 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "vsgp6L8_AlatL0t24Ob5o"
+uri = "file://Users.json"
+type = "unspecified"
+title = "Users.json — 4 admins + 100 users (v1.11 schema)"
+
+[[outputs]]
+id = "U8SH7vlLi8EjxdoBxg7wn"
+uri = "file://flexboard-website.zip"
+type = "unspecified"
+title = "FlexBoard Website ZIP"

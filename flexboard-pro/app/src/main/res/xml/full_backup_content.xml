@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 6-11 (API 23-30) Auto Backup rules.
+  Mirrors backup_rules.xml for older Android versions.
+
+  NOTE: When explicit <include> tags are present, Android backs up ONLY
+  those paths. Adding <exclude> for files not in the include list causes
+  Lint error FullBackupContent. Keep this file include-only.
+-->
+<full-backup-content>
+    <include domain="sharedpref" path="flexboard_settings.xml"/>
+    <include domain="sharedpref" path="flexboard_gate.xml"/>
+</full-backup-content>
