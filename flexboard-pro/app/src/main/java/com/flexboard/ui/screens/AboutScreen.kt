@@ -27,7 +27,7 @@ import androidx.compose.runtime.remember
 import com.flexboard.security.Obf
 import com.flexboard.security.ObfConstants
 
-private const val APP_VERSION = "1.15.0"
+private const val APP_VERSION = "1.25.0"
 
 private val ORANGE = Color(0xFFFF8C00)
 private val GOLD = Color(0xFFFFD700)
