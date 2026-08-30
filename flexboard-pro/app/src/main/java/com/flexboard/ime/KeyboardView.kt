@@ -79,10 +79,8 @@ class KeyboardView(
     private val onSwitchLanguage: () -> Unit,
     private val onOpenSettings: () -> Unit,
     /**
-     * Open a specific section of the host app (Theme / AutoType / Clipboard
-     * / etc.). Tools-grid tiles route through this so e.g. tapping the
-     * "Themes" tile lands the user directly in Theme & Appearance instead
-     * of the Home page (issue #1 in the user's review).
+     * Open a specific section of the host app (Plans / AutoType / Clipboard
+     * / etc.) from a tools-grid tile.
      */
     private val onOpenSection: (String) -> Unit = { onOpenSettings() },
     /** Returns the text immediately before the cursor (or empty). */
@@ -411,8 +409,9 @@ class KeyboardView(
      * Full set of tiles shown in the Gboard-style tools panel
      * (`PanelMode.TOOLS`, opened by tapping the ≡ button on the suggestion
      * strip). Lays out as a 4-column grid — see [rebuildTools]. Order is
-     * deliberate: the tools the user reaches for most (themes, font,
-     * clipboard, auto-type) sit on the top row.
+      * deliberate: the tools the user reaches for most (font, clipboard,
+      * auto-type) sit near the top row. Theme and space-button text settings
+      * are available from the app's main Theme settings screen only.
      */
     private fun allToolActions(): List<ToolAction> {
         // Disable Auto-Type whenever the plan is not active — covers Blocked,
@@ -423,10 +422,6 @@ class KeyboardView(
         } catch (_: Throwable) { false }
 
         return listOf(
-            // "Themes" tile now jumps DIRECTLY to the Theme & Appearance tab in
-            // the host app (it used to dump the user on the Home page —
-            // issue #1 in the user's review).
-            ToolAction("🎨", "Themes")    { onOpenSection("theme") },
             ToolAction("Aa", "Font", iconRes = R.drawable.ic_font_picker_v2, tintIcon = false) { v -> showFontPicker(v) },
             ToolAction("📋", "Clipboard") { showClipboardPopup() },
             // Math/Leet style panel (replaces Language tile per user request).
@@ -646,8 +641,8 @@ class KeyboardView(
 
     /**
      * Render the tools panel: a 4-column grid of icon-over-label tiles
-     * (Themes / Font / Clipboard / Auto-Type / Language / Emoji / Keyboard
-     * / Settings). Lays out inside `panelContainer` so it occupies the
+     * (Font / Clipboard / Auto-Type / Math Style / Effects / File Import /
+     * Plans / Settings). Lays out inside `panelContainer` so it occupies the
      * exact same on-screen real estate as the keys panel — the user sees
      * a clean swap, not an overlay.
      *
