@@ -1,0 +1,171 @@
+{
+  "version": 2,
+  "_comment_schema": "FlexBoard Pro v1.17+ schema. auto_typer field controls whether Auto-Typer + Auto-Sender is enabled for a device. plan_until: null = LIFETIME, future = active, past = PlanExpired. blocked wins over everything.",
+  "_comment_workflow": "Add user: copy android_id, set name, plan, plan_until (monthly=+30d, 6mo=+180d, yearly=+365d, lifetime=null). auto_typer=true to enable Auto-Typer for that device. App re-checks every ~5 minutes.",
+  "_comment_blocking": "To revoke: move entry to 'blocked'. Blocked wins over approved, so 'blocked' is safer if you might re-add the user later.",
+  "approved": [
+    {
+      "android_id": "2fe56517401eb728",
+      "name": "Mahar",
+      "plan": "halfyear",
+      "plan_until": "2026-12-03T17:41:01.049Z",
+      "auto_typer": true,
+      "ads_enabled": false,
+      "bound_device_id": "2fe56517401eb728"
+    },
+    {
+      "android_id": "139a6b0b28b4e0fb",
+      "name": "Raza",
+      "plan": "lifetime",
+      "plan_until": null,
+      "auto_typer": true
+    },
+    {
+      "android_id": "b6735b2c303dfebd",
+      "name": "Mano",
+      "plan": "monthly",
+      "plan_until": "2026-07-03T14:27:24.734Z",
+      "auto_typer": true,
+      "ads_enabled": true
+    },
+    {
+      "android_id": "63aff017163aeaff",
+      "name": "Nomi",
+      "plan": "monthly",
+      "plan_until": "2026-07-01T15:52:54.997Z",
+      "auto_typer": true,
+      "ads_enabled": true
+    },
+    {
+      "android_id": "767c99c55a47e03e",
+      "name": "Mian Amir",
+      "plan": "lifetime",
+      "plan_until": null,
+      "auto_typer": true,
+      "ads_enabled": true
+    },
+    {
+      "android_id": "264639ec5755cfa1",
+      "name": "Rizu",
+      "plan": "monthly",
+      "plan_until": "2026-07-05T06:43:57.928Z",
+      "auto_typer": true,
+      "ads_enabled": true
+    },
+    {
+      "android_id": "c086969cdad76612",
+      "name": "Sahil Khan",
+      "plan": "monthly",
+      "plan_until": "2026-07-03T14:26:51.375Z",
+      "auto_typer": true,
+      "ads_enabled": true
+    },
+    {
+      "android_id": "5847001b39abc248",
+      "name": "Ahemd",
+      "plan": "monthly",
+      "plan_until": "2026-07-05T06:43:08.500Z",
+      "auto_typer": true,
+      "ads_enabled": true
+    },
+    {
+      "android_id": "1a0663b1f05199e4",
+      "name": "Ali g",
+      "plan": "monthly",
+      "plan_until": "2026-07-05T12:41:55.303Z",
+      "auto_typer": true,
+      "ads_enabled": true
+    },
+    {
+      "android_id": "f65521fd32340c9b",
+      "name": "Me",
+      "plan": "halfyear",
+      "plan_until": "2026-12-03T16:12:13.094Z",
+      "auto_typer": true,
+      "ads_enabled": false,
+      "bound_device_id": "f65521fd32340c9b"
+    },
+    {
+      "android_id": "8f0dfef751d727ee",
+      "name": "Adiil",
+      "plan": "monthly",
+      "plan_until": "2026-07-06T17:31:44.528Z",
+      "auto_typer": true,
+      "ads_enabled": true,
+      "bound_device_id": "8f0dfef751d727ee"
+    },
+    {
+      "android_id": "f80983c13927a34e",
+      "name": "Mehak",
+      "plan": "monthly",
+      "plan_until": "2026-07-10T03:47:53.693Z",
+      "auto_typer": true,
+      "ads_enabled": true,
+      "bound_device_id": "f80983c13927a34e"
+    },
+    {
+      "android_id": "fb21bcb1fa1a8946",
+      "name": "Rocky",
+      "plan": "halfyear",
+      "plan_until": "2026-12-03T17:46:18.471Z",
+      "auto_typer": true,
+      "ads_enabled": true,
+      "bound_device_id": "fb21bcb1fa1a8946"
+    },
+    {
+      "android_id": "f5f856e76e2eff48",
+      "name": "Attaullah",
+      "plan": "halfyear",
+      "plan_until": "2026-12-03T19:46:04.443Z",
+      "auto_typer": true,
+      "ads_enabled": true,
+      "bound_device_id": "f5f856e76e2eff48"
+    },
+    {
+      "android_id": "3d7f2bd65853a0b6",
+      "name": "Adnan",
+      "plan": "halfyear",
+      "plan_until": "2026-12-04T18:24:21.838Z",
+      "auto_typer": true,
+      "ads_enabled": true,
+      "bound_device_id": "3d7f2bd65853a0b6"
+    },
+    {
+      "android_id": "482aee73b10313b0",
+      "name": "Rizu",
+      "plan": "monthly",
+      "plan_until": "2026-07-08T13:57:55.277Z",
+      "auto_typer": true,
+      "ads_enabled": false,
+      "bound_device_id": "482aee73b10313b0"
+    },
+    {
+      "android_id": "846048386665dee5",
+      "name": "Rizu",
+      "plan": "monthly",
+      "plan_until": "2026-07-09T11:36:14.903Z",
+      "auto_typer": true,
+      "ads_enabled": false,
+      "bound_device_id": "846048386665dee5"
+    },
+    {
+      "android_id": "248a532f3523fe49",
+      "name": "Ali ali",
+      "plan": "monthly",
+      "plan_until": "2026-07-10T03:46:56.021Z",
+      "auto_typer": true,
+      "ads_enabled": true,
+      "bound_device_id": "248a532f3523fe49"
+    },
+    {
+      "android_id": "167a58fb95a294c8",
+      "name": "Mian Amir",
+      "plan": "yearly",
+      "plan_until": "2027-06-18T16:51:41.716Z",
+      "auto_typer": true,
+      "ads_enabled": true,
+      "bound_device_id": "167a58fb95a294c8"
+    }
+  ],
+  "blocked": []
+}

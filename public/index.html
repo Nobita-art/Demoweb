@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FlexBoard Pro — Smart Android Keyboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --orange: #FF6B2B;
+      --orange-dark: #e05a1e;
+      --orange-light: #ff8c5a;
+      --bg: #0d0d0d;
+      --bg2: #141414;
+      --bg3: #1a1a1a;
+      --border: rgba(255,255,255,0.08);
+      --text: #f0f0f0;
+      --muted: #888;
+      --card: #181818;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      overflow-x: hidden;
+    }
+
+    nav {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      z-index: 100;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 5%;
+      height: 64px;
+      background: rgba(13,13,13,0.85);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .nav-brand {
+      font-size: 1.2rem;
+      font-weight: 800;
+      letter-spacing: -0.5px;
+      background: linear-gradient(90deg, var(--orange), var(--orange-light));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .nav-links {
+      display: flex;
+      gap: 2rem;
+      list-style: none;
+    }
+
+    .nav-links a {
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 0.9rem;
+      font-weight: 500;
+      transition: color 0.2s;
+    }
+
+    .nav-links a:hover { color: var(--text); }
+
+    .hero {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 100px 5% 60px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .hero::before {
+      content: '';
+      position: absolute;
+      top: -200px; left: 50%;
+      transform: translateX(-50%);
+      width: 800px; height: 800px;
+      background: radial-gradient(circle, rgba(255,107,43,0.15) 0%, transparent 70%);
+      pointer-events: none;
+    }
+
+    .hero-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(255,107,43,0.1);
+      border: 1px solid rgba(255,107,43,0.3);
+      color: var(--orange);
+      padding: 6px 16px;
+      border-radius: 50px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      margin-bottom: 1.5rem;
+    }
+
+    h1 {
+      font-size: clamp(2.5rem, 6vw, 5rem);
+      font-weight: 900;
+      line-height: 1.05;
+      letter-spacing: -2px;
+      margin-bottom: 1.5rem;
+    }
+
+    h1 span {
+      background: linear-gradient(135deg, var(--orange) 0%, var(--orange-light) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .hero-sub {
+      font-size: clamp(1rem, 2.5vw, 1.25rem);
+      color: var(--muted);
+      max-width: 580px;
+      margin: 0 auto 2.5rem;
+      line-height: 1.7;
+    }
+
+    .btn-download {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      background: linear-gradient(135deg, var(--orange), var(--orange-dark));
+      color: #fff;
+      text-decoration: none;
+      font-size: 1.1rem;
+      font-weight: 700;
+      padding: 18px 40px;
+      border-radius: 16px;
+      box-shadow: 0 8px 32px rgba(255,107,43,0.4);
+      transition: all 0.3s ease;
+      border: none;
+      cursor: pointer;
+      letter-spacing: -0.3px;
+    }
+
+    .btn-download:hover {
+      transform: translateY(-3px);
+      box-shadow: 0 12px 40px rgba(255,107,43,0.5);
+      background: linear-gradient(135deg, var(--orange-light), var(--orange));
+    }
+
+    .btn-download svg { width: 22px; height: 22px; fill: currentColor; }
+
+    .hero-stats {
+      display: flex;
+      gap: 3rem;
+      margin-top: 3.5rem;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+
+    .stat { text-align: center; }
+
+    .stat-num {
+      font-size: 2rem;
+      font-weight: 800;
+      color: var(--orange);
+      display: block;
+      line-height: 1;
+    }
+
+    .stat-label {
+      font-size: 0.8rem;
+      color: var(--muted);
+      font-weight: 500;
+      margin-top: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .keyboard-preview {
+      margin-top: 4rem;
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: 24px;
+      padding: 20px;
+      max-width: 420px;
+      width: 100%;
+      box-shadow: 0 30px 80px rgba(0,0,0,0.5);
+    }
+
+    .kb-row {
+      display: flex;
+      gap: 6px;
+      justify-content: center;
+      margin-bottom: 6px;
+    }
+
+    .kb-key {
+      background: #2a2a2a;
+      border-radius: 8px;
+      height: 42px;
+      min-width: 34px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.85rem;
+      font-weight: 500;
+      color: #ccc;
+      flex: 1;
+      max-width: 42px;
+      border: 1px solid #333;
+    }
+
+    .kb-key.orange {
+      background: linear-gradient(135deg, var(--orange), var(--orange-dark));
+      color: #fff;
+      font-weight: 700;
+    }
+
+    .kb-space {
+      flex: 4;
+      max-width: 200px;
+      font-size: 0.65rem;
+      color: var(--orange);
+      font-weight: 700;
+    }
+
+    section { padding: 80px 5%; }
+
+    .section-label {
+      color: var(--orange);
+      font-size: 0.8rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      margin-bottom: 12px;
+    }
+
+    .section-title {
+      font-size: clamp(1.8rem, 4vw, 2.8rem);
+      font-weight: 800;
+      letter-spacing: -1px;
+      line-height: 1.15;
+      margin-bottom: 1rem;
+    }
+
+    .section-sub {
+      color: var(--muted);
+      font-size: 1.05rem;
+      max-width: 540px;
+      line-height: 1.7;
+    }
+
+    .features { background: var(--bg2); }
+
+    .features-header { text-align: center; margin-bottom: 60px; }
+
+    .features-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 24px;
+      max-width: 1100px;
+      margin: 0 auto;
+    }
+
+    .feature-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 32px;
+      transition: border-color 0.3s, transform 0.3s;
+    }
+
+    .feature-card:hover {
+      border-color: rgba(255,107,43,0.4);
+      transform: translateY(-4px);
+    }
+
+    .feature-icon {
+      width: 52px; height: 52px;
+      background: rgba(255,107,43,0.12);
+      border-radius: 14px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.5rem;
+      margin-bottom: 20px;
+      border: 1px solid rgba(255,107,43,0.2);
+    }
+
+    .feature-card h3 {
+      font-size: 1.1rem;
+      font-weight: 700;
+      margin-bottom: 10px;
+    }
+
+    .feature-card p {
+      color: var(--muted);
+      font-size: 0.92rem;
+      line-height: 1.6;
+    }
+
+    .how-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 32px;
+      max-width: 900px;
+      margin: 50px auto 0;
+      text-align: center;
+    }
+
+    .how-step { padding: 24px; }
+
+    .step-num {
+      width: 52px; height: 52px;
+      background: linear-gradient(135deg, var(--orange), var(--orange-dark));
+      border-radius: 14px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.3rem;
+      font-weight: 800;
+      color: #fff;
+      margin: 0 auto 20px;
+      box-shadow: 0 4px 16px rgba(255,107,43,0.35);
+    }
+
+    .how-step h3 {
+      font-size: 1.05rem;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+
+    .how-step p {
+      color: var(--muted);
+      font-size: 0.88rem;
+      line-height: 1.6;
+    }
+
+    .cta-section {
+      text-align: center;
+      padding: 80px 5%;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .cta-section::before {
+      content: '';
+      position: absolute;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      width: 600px; height: 400px;
+      background: radial-gradient(ellipse, rgba(255,107,43,0.1) 0%, transparent 70%);
+      pointer-events: none;
+    }
+
+    .cta-section h2 {
+      font-size: clamp(1.8rem, 4vw, 3rem);
+      font-weight: 800;
+      letter-spacing: -1px;
+      margin-bottom: 1rem;
+    }
+
+    .cta-section p {
+      color: var(--muted);
+      font-size: 1.05rem;
+      max-width: 480px;
+      margin: 0 auto 2.5rem;
+    }
+
+    footer {
+      background: var(--bg);
+      border-top: 1px solid var(--border);
+      padding: 32px 5%;
+      text-align: center;
+    }
+
+    footer p { color: var(--muted); font-size: 0.85rem; }
+    footer a { color: var(--orange); text-decoration: none; }
+
+    @media (max-width: 768px) {
+      .nav-links { display: none; }
+      .hero-stats { gap: 1.5rem; }
+      .stat-num { font-size: 1.5rem; }
+      .how-grid { grid-template-columns: 1fr 1fr; }
+      section { padding: 60px 5%; }
+    }
+
+    @media (max-width: 480px) {
+      .how-grid { grid-template-columns: 1fr; }
+      h1 { letter-spacing: -1px; }
+      .btn-download { font-size: 1rem; padding: 16px 28px; }
+      .keyboard-preview { padding: 14px; }
+      .kb-key { height: 36px; font-size: 0.75rem; min-width: 28px; }
+    }
+  </style>
+</head>
+<body>
+
+  <nav>
+    <div class="nav-brand">FlexBoard Pro</div>
+    <ul class="nav-links">
+      <li><a href="#features">Features</a></li>
+      <li><a href="#how">How It Works</a></li>
+    </ul>
+  </nav>
+
+  <section class="hero">
+    <div class="hero-badge">World's Smartest Android Keyboard</div>
+    <h1>Type Smarter,<br /><span>Type Faster</span></h1>
+    <p class="hero-sub">
+      FlexBoard Pro is a powerful Android keyboard with auto-typing, real-time WPM tracking,
+      100+ themes, multi-language support, and smart send — built for power users.
+    </p>
+
+    <div class="hero-stats">
+      <div class="stat">
+        <span class="stat-num">100+</span>
+        <span class="stat-label">Active Users</span>
+      </div>
+      <div class="stat">
+        <span class="stat-num">36+</span>
+        <span class="stat-label">Fonts</span>
+      </div>
+      <div class="stat">
+        <span class="stat-num">1900+</span>
+        <span class="stat-label">Emojis</span>
+      </div>
+      <div class="stat">
+        <span class="stat-num">✅</span>
+        <span class="stat-label">Latest Update</span>
+      </div>
+    </div>
+
+    <div class="keyboard-preview" aria-hidden="true">
+      <div class="kb-row">
+        <div class="kb-key">q</div><div class="kb-key">w</div><div class="kb-key">e</div>
+        <div class="kb-key">r</div><div class="kb-key">t</div><div class="kb-key">y</div>
+        <div class="kb-key">u</div><div class="kb-key">i</div><div class="kb-key">o</div>
+        <div class="kb-key">p</div>
+      </div>
+      <div class="kb-row">
+        <div class="kb-key">a</div><div class="kb-key">s</div><div class="kb-key">d</div>
+        <div class="kb-key">f</div><div class="kb-key">g</div><div class="kb-key">h</div>
+        <div class="kb-key">j</div><div class="kb-key">k</div><div class="kb-key">l</div>
+      </div>
+      <div class="kb-row">
+        <div class="kb-key orange">⇧</div>
+        <div class="kb-key">z</div><div class="kb-key">x</div><div class="kb-key">c</div>
+        <div class="kb-key">v</div><div class="kb-key">b</div><div class="kb-key">n</div>
+        <div class="kb-key">m</div>
+        <div class="kb-key orange">⌫</div>
+      </div>
+      <div class="kb-row">
+        <div class="kb-key orange" style="max-width:52px">123</div>
+        <div class="kb-key kb-space">I love Raza</div>
+        <div class="kb-key orange" style="max-width:64px">Send ➤</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="features" id="features">
+    <div class="features-header">
+      <div class="section-label">Features</div>
+      <h2 class="section-title">Everything You Need in a Keyboard</h2>
+      <p class="section-sub">FlexBoard Pro packs professional-grade tools into your Android keyboard.</p>
+    </div>
+    <div class="features-grid">
+      <div class="feature-card">
+        <div class="feature-icon">⚡</div>
+        <h3>Auto-Typer</h3>
+        <p>Automatically type and send messages line by line to any chat app — WhatsApp, Telegram, Instagram, and more. Smart auto-send included.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">📊</div>
+        <h3>Live WPM Tracker</h3>
+        <p>See your real-time typing speed in words per minute right on the keyboard strip. Beat your personal best every session.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🎨</div>
+        <h3>Full Customization</h3>
+        <p>Choose from 36+ fonts, custom background images, key opacity, border styles, spacing, colors, and full theme support.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">😄</div>
+        <h3>1900+ Emojis & Symbols</h3>
+        <p>Complete Unicode 18.0 emoji catalog, 617 cool symbols, 94 stylish divider lines — all in an easy-to-browse panel.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">📋</div>
+        <h3>Smart Clipboard</h3>
+        <p>Save and reuse frequently used text snippets directly from your keyboard. Never retype the same thing twice.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🌐</div>
+        <h3>Multi-Language</h3>
+        <p>Type in Roman Urdu, English, and more with intelligent context-aware suggestions and bigram predictions.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🎯</div>
+        <h3>Smart Auto-Send</h3>
+        <p>The keyboard detects the app you're using and sends messages the right way — no floating buttons, no setup needed.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🔒</div>
+        <h3>Secure Access</h3>
+        <p>Approval-based access system ensures only authorized devices can use FlexBoard Pro.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="how">
+    <div style="text-align:center; margin-bottom: 0;">
+      <div class="section-label">How It Works</div>
+      <h2 class="section-title">Up and Running in Minutes</h2>
+      <p class="section-sub" style="margin: 0 auto;">Simple setup, powerful result. Follow these steps to activate FlexBoard Pro.</p>
+    </div>
+    <div class="how-grid">
+      <div class="how-step">
+        <div class="step-num">1</div>
+        <h3>Download APK</h3>
+        <p>Download and install the FlexBoard Pro APK on your Android device. Enable installation from unknown sources if needed.</p>
+      </div>
+      <div class="how-step">
+        <div class="step-num">2</div>
+        <h3>Enable Keyboard</h3>
+        <p>Go to Settings → Language &amp; Input → Manage Keyboards and enable FlexBoard Pro as your active keyboard.</p>
+      </div>
+      <div class="how-step">
+        <div class="step-num">3</div>
+        <h3>Get Approved</h3>
+        <p>Send your Device ID to the admin via WhatsApp to get approved and unlock full access.</p>
+      </div>
+      <div class="how-step">
+        <div class="step-num">4</div>
+        <h3>Start Typing</h3>
+        <p>Once approved, enjoy all FlexBoard Pro features with no limits. Auto-type, themes, emojis and more.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="cta-section">
+    <h2>Ready to Type Smarter?</h2>
+    <p>Download FlexBoard Pro today and experience the most powerful keyboard for Android.</p>
+    <a class="btn-download" id="download-btn-2" href="#" target="_blank" rel="noopener">
+      <svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+      Download APK
+    </a>
+  </section>
+
+  <footer>
+    <p>© 2026 FlexBoard Pro · Developed by <strong>Kashif Raza</strong> · ATF Team ·
+      <a href="https://wa.me/923001677853" target="_blank">WhatsApp Support</a>
+    </p>
+  </footer>
+
+  <script>
+    fetch('/api/settings/public')
+      .then(r => r.json())
+      .then(s => {
+        const dl = s.download_link || '#';
+        const ver = s.app_version || '1.11';
+        document.getElementById('download-btn-2').href = dl;
+        const vEl = document.getElementById('stat-version');
+        if (vEl) vEl.textContent = ver;
+      })
+      .catch(() => {});
+  </script>
+</body>
+</html>
